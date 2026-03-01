@@ -419,4 +419,37 @@ mod tests {
             .unwrap();
         assert!(!manager.status().kill_all);
     }
+
+    /// REQ-SEC-ESTOP-005-SC01
+    #[test]
+    fn estop_state_is_engaged_when_any_level_active() {
+        let mut state = EstopState::default();
+        assert!(!state.is_engaged());
+
+        state.kill_all = true;
+        assert!(state.is_engaged());
+
+        state.kill_all = false;
+        state.network_kill = true;
+        assert!(state.is_engaged());
+
+        state.network_kill = false;
+        state.blocked_domains = vec!["*.test.com".to_string()];
+        assert!(state.is_engaged());
+
+        state.blocked_domains.clear();
+        state.frozen_tools = vec!["shell".to_string()];
+        assert!(state.is_engaged());
+    }
+
+    /// REQ-SEC-ESTOP-005-SC02
+    #[test]
+    fn estop_state_default_is_not_engaged() {
+        let state = EstopState::default();
+        assert!(!state.is_engaged());
+        assert!(!state.kill_all);
+        assert!(!state.network_kill);
+        assert!(state.blocked_domains.is_empty());
+        assert!(state.frozen_tools.is_empty());
+    }
 }

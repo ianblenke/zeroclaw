@@ -199,6 +199,88 @@ mod tests {
         assert_eq!(history[0].content, "recent");
     }
 
+    /// REQ-HIST-001-SC01
+    #[test]
+    fn trim_history_within_limit() {
+        let mut history = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi"),
+        ];
+        let original_len = history.len();
+        trim_history(&mut history, 10);
+        assert_eq!(history.len(), original_len);
+    }
+
+    /// REQ-HIST-001-SC02
+    #[test]
+    fn trim_history_preserves_system() {
+        let mut history = vec![
+            ChatMessage::system("system prompt"),
+            ChatMessage::user("old"),
+            ChatMessage::user("older"),
+            ChatMessage::user("recent"),
+        ];
+        trim_history(&mut history, 1);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, "system");
+        assert_eq!(history[1].content, "recent");
+    }
+
+    /// REQ-HIST-002-SC01
+    #[test]
+    fn compaction_transcript_format() {
+        let messages = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi there"),
+        ];
+        let transcript = build_compaction_transcript(&messages);
+        assert!(transcript.contains("USER: hello"));
+        assert!(transcript.contains("ASSISTANT: hi there"));
+    }
+
+    /// REQ-HIST-002-SC02
+    #[test]
+    fn compaction_transcript_truncated() {
+        // Build a very long message list
+        let mut messages = Vec::new();
+        for i in 0..500 {
+            messages.push(ChatMessage::user(format!("message number {i} with some padding text to fill up space quickly")));
+        }
+        let transcript = build_compaction_transcript(&messages);
+        assert!(transcript.chars().count() <= COMPACTION_MAX_SOURCE_CHARS + 10);
+    }
+
+    /// REQ-HIST-003-SC01
+    #[test]
+    fn apply_compaction_replaces_range() {
+        let mut history = vec![
+            ChatMessage::user("old1"),
+            ChatMessage::user("old2"),
+            ChatMessage::user("old3"),
+            ChatMessage::user("recent"),
+        ];
+        apply_compaction_summary(&mut history, 0, 3, "summary of old messages");
+        assert_eq!(history.len(), 2);
+        assert!(history[0].content.contains("[Compaction summary]"));
+        assert!(history[0].content.contains("summary of old messages"));
+        assert_eq!(history[1].content, "recent");
+    }
+
+    /// REQ-HIST-004-SC01
+    #[tokio::test]
+    async fn auto_compact_within_limit() {
+        let mut history = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi"),
+        ];
+        let compacted =
+            auto_compact_history(&mut history, &StaticSummaryProvider, "test", 100, None)
+                .await
+                .unwrap();
+        assert!(!compacted);
+        assert_eq!(history.len(), 2);
+    }
+
     #[tokio::test]
     async fn auto_compact_history_does_not_split_tool_run_boundary() {
         let mut history = vec![

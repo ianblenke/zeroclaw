@@ -439,4 +439,16 @@ mod tests {
         assert!(matches!(result_low, GuardResult::Suspicious(_, _)));
         assert!(matches!(result_high, GuardResult::Blocked(_)));
     }
+
+    /// REQ-SEC-GUARD-004-SC01
+    #[test]
+    fn guard_action_from_str_parses_known_values() {
+        assert_eq!(GuardAction::from_str("block"), GuardAction::Block);
+        assert_eq!(GuardAction::from_str("BLOCK"), GuardAction::Block);
+        assert_eq!(GuardAction::from_str("sanitize"), GuardAction::Sanitize);
+        assert_eq!(GuardAction::from_str("Sanitize"), GuardAction::Sanitize);
+        assert_eq!(GuardAction::from_str("warn"), GuardAction::Warn);
+        assert_eq!(GuardAction::from_str("unknown"), GuardAction::Warn);
+        assert_eq!(GuardAction::from_str(""), GuardAction::Warn);
+    }
 }

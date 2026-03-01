@@ -73,3 +73,108 @@ pub trait Peripheral: Send + Sync {
     /// [`connect`](Peripheral::connect).
     fn tools(&self) -> Vec<Box<dyn Tool>>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::traits::{ToolResult, ToolSpec};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct MockTool {
+        tool_name: String,
+    }
+
+    #[async_trait]
+    impl Tool for MockTool {
+        fn name(&self) -> &str {
+            &self.tool_name
+        }
+        fn description(&self) -> &str {
+            "mock tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+            Ok(ToolResult {
+                success: true,
+                output: "mock".into(),
+                error: None,
+            })
+        }
+    }
+
+    struct MockPeripheral {
+        connected: Arc<AtomicBool>,
+    }
+
+    impl MockPeripheral {
+        fn new() -> Self {
+            Self {
+                connected: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Peripheral for MockPeripheral {
+        fn name(&self) -> &str {
+            "mock-peripheral-0"
+        }
+
+        fn board_type(&self) -> &str {
+            "mock-board"
+        }
+
+        async fn connect(&mut self) -> anyhow::Result<()> {
+            self.connected.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> anyhow::Result<()> {
+            self.connected.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn health_check(&self) -> bool {
+            self.connected.load(Ordering::SeqCst)
+        }
+
+        fn tools(&self) -> Vec<Box<dyn Tool>> {
+            vec![Box::new(MockTool {
+                tool_name: "gpio_read".into(),
+            })]
+        }
+    }
+
+    /// REQ-PERIPH-001-SC01
+    #[tokio::test]
+    async fn peripheral_lifecycle_connect_check_disconnect() {
+        let mut peripheral = MockPeripheral::new();
+
+        // Before connect: health check should fail
+        assert!(!peripheral.health_check().await);
+
+        // Connect
+        peripheral.connect().await.unwrap();
+        assert!(peripheral.health_check().await);
+
+        // Tools are available
+        let tools = peripheral.tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "gpio_read");
+
+        // Disconnect
+        peripheral.disconnect().await.unwrap();
+        assert!(!peripheral.health_check().await);
+    }
+
+    /// REQ-PERIPH-002-SC01
+    #[test]
+    fn peripheral_name_and_board_type() {
+        let peripheral = MockPeripheral::new();
+        assert_eq!(peripheral.name(), "mock-peripheral-0");
+        assert_eq!(peripheral.board_type(), "mock-board");
+    }
+}

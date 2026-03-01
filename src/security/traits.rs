@@ -93,6 +93,13 @@ mod tests {
         assert!(NoopSandbox.is_available());
     }
 
+    /// REQ-SAND-004-SC01
+    #[test]
+    fn noop_sandbox_description() {
+        let desc = NoopSandbox.description();
+        assert!(desc.contains("No sandboxing"));
+    }
+
     #[test]
     fn noop_sandbox_wrap_command_is_noop() {
         let mut cmd = Command::new("echo");

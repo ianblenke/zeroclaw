@@ -91,4 +91,23 @@ mod tests {
         assert!(!is_sensitive_file_path(Path::new("src/main.rs")));
         assert!(!is_sensitive_file_path(Path::new("notes/readme.md")));
     }
+
+    /// REQ-SEC-SENS-004-SC01
+    #[test]
+    fn detects_env_variations() {
+        assert!(is_sensitive_file_path(Path::new(".env.production")));
+        assert!(is_sensitive_file_path(Path::new(".env.local")));
+        assert!(is_sensitive_file_path(Path::new(".env.staging")));
+        assert!(is_sensitive_file_path(Path::new("config/.env.test")));
+    }
+
+    /// REQ-SEC-SENS-005-SC01
+    #[test]
+    fn detection_is_case_insensitive() {
+        assert!(is_sensitive_file_path(Path::new("ID_RSA")));
+        assert!(is_sensitive_file_path(Path::new(".ENV")));
+        assert!(is_sensitive_file_path(Path::new("Credentials.json")));
+        assert!(is_sensitive_file_path(Path::new("cert.PEM")));
+        assert!(is_sensitive_file_path(Path::new(".SSH/config")));
+    }
 }

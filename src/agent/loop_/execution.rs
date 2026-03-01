@@ -163,3 +163,157 @@ pub(super) async fn execute_tools_sequential(
 
     Ok(outcomes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observability::noop::NoopObserver;
+    use crate::tools::ToolResult;
+
+    struct MockTool {
+        tool_name: &'static str,
+        result: ToolResult,
+    }
+
+    impl Tool for MockTool {
+        fn name(&self) -> &str {
+            self.tool_name
+        }
+
+        fn description(&self) -> &str {
+            "mock tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+            Ok(self.result.clone())
+        }
+    }
+
+    fn success_tool(name: &'static str) -> Box<dyn Tool> {
+        Box::new(MockTool {
+            tool_name: name,
+            result: ToolResult {
+                success: true,
+                output: "ok".to_string(),
+                error: None,
+            },
+        })
+    }
+
+    fn error_tool(name: &'static str) -> Box<dyn Tool> {
+        Box::new(MockTool {
+            tool_name: name,
+            result: ToolResult {
+                success: false,
+                output: "something went wrong".to_string(),
+                error: Some("tool error".to_string()),
+            },
+        })
+    }
+
+    /// REQ-EXEC-001-SC01
+    #[test]
+    fn find_tool_returns_matching() {
+        let tools: Vec<Box<dyn Tool>> = vec![success_tool("shell"), success_tool("file_read")];
+        assert!(find_tool(&tools, "shell").is_some());
+        assert_eq!(find_tool(&tools, "shell").unwrap().name(), "shell");
+    }
+
+    /// REQ-EXEC-001-SC02
+    #[test]
+    fn find_tool_returns_none_for_unknown() {
+        let tools: Vec<Box<dyn Tool>> = vec![success_tool("shell")];
+        assert!(find_tool(&tools, "nonexistent").is_none());
+    }
+
+    /// REQ-EXEC-002-SC01
+    #[tokio::test]
+    async fn execute_one_tool_success() {
+        let tools: Vec<Box<dyn Tool>> = vec![success_tool("shell")];
+        let observer = NoopObserver;
+        let outcome = execute_one_tool(
+            "shell",
+            serde_json::json!({"command": "ls"}),
+            &tools,
+            &observer,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.output, "ok");
+        assert!(outcome.error_reason.is_none());
+    }
+
+    /// REQ-EXEC-002-SC02
+    #[tokio::test]
+    async fn execute_one_tool_unknown_tool() {
+        let tools: Vec<Box<dyn Tool>> = vec![success_tool("shell")];
+        let observer = NoopObserver;
+        let outcome = execute_one_tool(
+            "nonexistent",
+            serde_json::json!({}),
+            &tools,
+            &observer,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!outcome.success);
+        assert!(outcome.output.contains("Unknown tool"));
+        assert!(outcome.error_reason.is_some());
+    }
+
+    /// REQ-EXEC-002-SC03
+    #[tokio::test]
+    async fn execute_one_tool_tool_error() {
+        let tools: Vec<Box<dyn Tool>> = vec![error_tool("shell")];
+        let observer = NoopObserver;
+        let outcome = execute_one_tool(
+            "shell",
+            serde_json::json!({}),
+            &tools,
+            &observer,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!outcome.success);
+        assert!(outcome.output.starts_with("Error:"));
+        assert!(outcome.error_reason.is_some());
+    }
+
+    /// REQ-EXEC-003-SC01
+    #[test]
+    fn parallel_single_call_false() {
+        let calls = vec![ParsedToolCall {
+            name: "shell".to_string(),
+            arguments: serde_json::json!({}),
+            tool_call_id: None,
+        }];
+        assert!(!should_execute_tools_in_parallel(&calls, None));
+        assert!(!should_execute_tools_in_parallel(&[], None));
+    }
+
+    /// REQ-EXEC-003-SC02
+    #[test]
+    fn parallel_multiple_no_approval() {
+        let calls = vec![
+            ParsedToolCall {
+                name: "shell".to_string(),
+                arguments: serde_json::json!({}),
+                tool_call_id: None,
+            },
+            ParsedToolCall {
+                name: "file_read".to_string(),
+                arguments: serde_json::json!({}),
+                tool_call_id: None,
+            },
+        ];
+        assert!(should_execute_tools_in_parallel(&calls, None));
+    }
+}

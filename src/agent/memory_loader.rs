@@ -196,6 +196,28 @@ mod tests {
         assert!(context.contains("- k: v"));
     }
 
+    /// REQ-LOADER-001-SC03
+    #[tokio::test]
+    async fn default_loader_filters_low_score() {
+        let loader = DefaultMemoryLoader::new(5, 0.8);
+        let memory = MockMemoryWithEntries {
+            entries: Arc::new(vec![
+                MemoryEntry {
+                    id: "1".into(),
+                    key: "low_score".into(),
+                    content: "should be filtered".into(),
+                    category: MemoryCategory::Conversation,
+                    timestamp: "now".into(),
+                    session_id: None,
+                    score: Some(0.2),
+                },
+            ]),
+        };
+
+        let context = loader.load_context(&memory, "query").await.unwrap();
+        assert!(context.is_empty(), "low-score entries should be filtered out");
+    }
+
     #[tokio::test]
     async fn default_loader_skips_legacy_assistant_autosave_entries() {
         let loader = DefaultMemoryLoader::new(5, 0.0);

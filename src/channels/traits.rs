@@ -297,6 +297,36 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// REQ-CHAN-007-SC01
+    #[test]
+    fn send_message_new_sets_fields() {
+        let msg = SendMessage::new("hello", "bob");
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.recipient, "bob");
+        assert!(msg.subject.is_none());
+        assert!(msg.thread_ts.is_none());
+    }
+
+    /// REQ-CHAN-007-SC02
+    #[test]
+    fn send_message_with_subject_sets_all_fields() {
+        let msg = SendMessage::with_subject("hello", "bob", "re: test");
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.recipient, "bob");
+        assert_eq!(msg.subject.as_deref(), Some("re: test"));
+        assert!(msg.thread_ts.is_none());
+    }
+
+    /// REQ-CHAN-007-SC03
+    #[test]
+    fn send_message_in_thread_sets_thread_ts() {
+        let msg = SendMessage::new("hello", "bob").in_thread(Some("ts123".into()));
+        assert_eq!(msg.thread_ts.as_deref(), Some("ts123"));
+
+        let msg_none = SendMessage::new("hello", "bob").in_thread(None);
+        assert!(msg_none.thread_ts.is_none());
+    }
+
     #[tokio::test]
     async fn approval_prompt_short_args_not_truncated() {
         let channel = DummyChannel;

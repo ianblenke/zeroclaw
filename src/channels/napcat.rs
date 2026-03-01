@@ -492,6 +492,182 @@ mod tests {
         assert_eq!(msg.thread_ts.as_deref(), Some("99"));
     }
 
+    /// REQ-CHAN-017-SC01
+    #[test]
+    fn derive_api_base_converts_wss_to_https() {
+        let base = derive_api_base_from_websocket("wss://secure.example.com:8443/ws?token=abc").unwrap();
+        assert_eq!(base, "https://secure.example.com:8443");
+    }
+
+    /// REQ-CHAN-017-SC02
+    #[test]
+    fn derive_api_base_invalid_scheme_returns_none() {
+        assert!(derive_api_base_from_websocket("http://not-ws.com").is_none());
+        assert!(derive_api_base_from_websocket("ftp://bad.com").is_none());
+    }
+
+    /// REQ-CHAN-017-SC03
+    #[test]
+    fn normalize_token_trims_and_filters_empty() {
+        assert_eq!(normalize_token("  abc  "), Some("abc".to_string()));
+        assert_eq!(normalize_token(""), None);
+        assert_eq!(normalize_token("   "), None);
+    }
+
+    /// REQ-CHAN-017-SC04
+    #[test]
+    fn compose_onebot_content_no_reply_no_image() {
+        let parsed = compose_onebot_content("just text", None);
+        assert_eq!(parsed, "just text");
+    }
+
+    /// REQ-CHAN-017-SC05
+    #[test]
+    fn compose_onebot_content_skips_empty_reply_id() {
+        let parsed = compose_onebot_content("hello", Some("  "));
+        assert!(!parsed.contains("[CQ:reply"));
+    }
+
+    /// REQ-CHAN-017-SC06
+    #[test]
+    fn parse_message_segments_plain_text() {
+        let val = serde_json::json!("hello world");
+        assert_eq!(parse_message_segments(&val), "hello world");
+    }
+
+    /// REQ-CHAN-017-SC07
+    #[test]
+    fn parse_message_segments_array_with_text_and_image() {
+        let val = serde_json::json!([
+            {"type": "text", "data": {"text": "photo"}},
+            {"type": "image", "data": {"url": "https://img.example.com/1.jpg"}}
+        ]);
+        let result = parse_message_segments(&val);
+        assert!(result.contains("photo"));
+        assert!(result.contains("[IMAGE:https://img.example.com/1.jpg]"));
+    }
+
+    /// REQ-CHAN-017-SC08
+    #[test]
+    fn parse_message_segments_empty_array() {
+        let val = serde_json::json!([]);
+        assert_eq!(parse_message_segments(&val), "");
+    }
+
+    /// REQ-CHAN-017-SC09
+    #[test]
+    fn parse_message_segments_non_string_non_array() {
+        let val = serde_json::json!(42);
+        assert_eq!(parse_message_segments(&val), "");
+    }
+
+    /// REQ-CHAN-017-SC10
+    #[test]
+    fn extract_message_id_integer() {
+        let event = serde_json::json!({"message_id": 42});
+        assert_eq!(extract_message_id(&event), "42");
+    }
+
+    /// REQ-CHAN-017-SC11
+    #[test]
+    fn extract_message_id_string() {
+        let event = serde_json::json!({"message_id": "abc-123"});
+        assert_eq!(extract_message_id(&event), "abc-123");
+    }
+
+    /// REQ-CHAN-017-SC12
+    #[test]
+    fn extract_message_id_missing_generates_uuid() {
+        let event = serde_json::json!({});
+        let id = extract_message_id(&event);
+        assert!(!id.is_empty());
+        // Should be a valid UUID
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+    }
+
+    /// REQ-CHAN-017-SC13
+    #[test]
+    fn from_config_empty_websocket_url_fails() {
+        let cfg = NapcatConfig {
+            websocket_url: "".into(),
+            api_base_url: "".into(),
+            access_token: None,
+            allowed_users: vec![],
+        };
+        assert!(NapcatChannel::from_config(cfg).is_err());
+    }
+
+    /// REQ-CHAN-017-SC14
+    #[test]
+    fn from_config_derives_api_base_from_websocket() {
+        let cfg = NapcatConfig {
+            websocket_url: "ws://localhost:3001/ws".into(),
+            api_base_url: "".into(),
+            access_token: Some("  mytoken  ".into()),
+            allowed_users: vec!["*".into()],
+        };
+        let ch = NapcatChannel::from_config(cfg).unwrap();
+        assert_eq!(ch.api_base_url, "http://localhost:3001");
+        assert_eq!(ch.access_token, Some("mytoken".to_string()));
+    }
+
+    /// REQ-CHAN-017-SC15
+    #[test]
+    fn is_user_allowed_wildcard() {
+        let cfg = NapcatConfig {
+            websocket_url: "ws://localhost:3001".into(),
+            api_base_url: "".into(),
+            access_token: None,
+            allowed_users: vec!["*".into()],
+        };
+        let ch = NapcatChannel::from_config(cfg).unwrap();
+        assert!(ch.is_user_allowed("anyone"));
+    }
+
+    /// REQ-CHAN-017-SC16
+    #[test]
+    fn is_user_allowed_specific() {
+        let cfg = NapcatConfig {
+            websocket_url: "ws://localhost:3001".into(),
+            api_base_url: "".into(),
+            access_token: None,
+            allowed_users: vec!["user1".into()],
+        };
+        let ch = NapcatChannel::from_config(cfg).unwrap();
+        assert!(ch.is_user_allowed("user1"));
+        assert!(!ch.is_user_allowed("user2"));
+    }
+
+    /// REQ-CHAN-017-SC17
+    #[tokio::test]
+    async fn is_duplicate_tracks_message_ids() {
+        let cfg = NapcatConfig {
+            websocket_url: "ws://localhost:3001".into(),
+            api_base_url: "".into(),
+            access_token: None,
+            allowed_users: vec![],
+        };
+        let ch = NapcatChannel::from_config(cfg).unwrap();
+        assert!(!ch.is_duplicate("msg1").await);
+        assert!(ch.is_duplicate("msg1").await);
+        assert!(!ch.is_duplicate("msg2").await);
+    }
+
+    /// REQ-CHAN-017-SC18
+    #[tokio::test]
+    async fn is_duplicate_empty_id_not_tracked() {
+        let cfg = NapcatConfig {
+            websocket_url: "ws://localhost:3001".into(),
+            api_base_url: "".into(),
+            access_token: None,
+            allowed_users: vec![],
+        };
+        let ch = NapcatChannel::from_config(cfg).unwrap();
+        // Empty IDs should never be considered duplicates
+        assert!(!ch.is_duplicate("").await);
+        assert!(!ch.is_duplicate("").await);
+    }
+
     #[tokio::test]
     async fn parse_group_event_with_image_segment() {
         let cfg = NapcatConfig {

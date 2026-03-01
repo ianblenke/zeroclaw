@@ -53,4 +53,23 @@ mod tests {
         let meta = std::fs::metadata(&original).unwrap();
         assert!(has_multiple_hard_links(&meta));
     }
+
+    /// REQ-SEC-LINK-003-SC01
+    #[cfg(unix)]
+    #[test]
+    fn symlink_does_not_trigger_hard_link_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("target.txt");
+        let link = dir.path().join("symlink.txt");
+        std::fs::write(&original, "hello").unwrap();
+
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+
+        // The original file's hard link count should still be 1
+        let meta = std::fs::metadata(&original).unwrap();
+        assert!(
+            !has_multiple_hard_links(&meta),
+            "symlink should not increment hard link count"
+        );
+    }
 }

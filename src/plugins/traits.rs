@@ -122,6 +122,86 @@ mod tests {
         }
     }
 
+    /// REQ-PLUG-003-SC01
+    #[test]
+    fn plugin_capability_serde_roundtrip() {
+        let caps = vec![
+            PluginCapability::Hooks,
+            PluginCapability::Tools,
+            PluginCapability::Providers,
+            PluginCapability::ModifyToolResults,
+        ];
+        let json = serde_json::to_string(&caps).unwrap();
+        let parsed: Vec<PluginCapability> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), 4);
+        assert_eq!(parsed[0], PluginCapability::Hooks);
+        assert_eq!(parsed[1], PluginCapability::Tools);
+        assert_eq!(parsed[2], PluginCapability::Providers);
+        assert_eq!(parsed[3], PluginCapability::ModifyToolResults);
+    }
+
+    /// REQ-PLUG-004-SC01
+    #[test]
+    fn plugin_logger_has_correct_prefix() {
+        let logger = PluginLogger::new("my-plugin");
+        assert!(logger.prefix.contains("[plugin:my-plugin]"));
+    }
+
+    /// REQ-PLUG-002-SC01
+    #[test]
+    fn plugin_api_accumulates_tools_and_hooks() {
+        use crate::hooks::HookHandler;
+        use crate::tools::traits::{Tool, ToolResult};
+
+        struct TestTool;
+        #[async_trait]
+        impl Tool for TestTool {
+            fn name(&self) -> &str {
+                "test-tool"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+                Ok(ToolResult {
+                    success: true,
+                    output: String::new(),
+                    error: None,
+                })
+            }
+        }
+
+        struct TestHookHandler;
+        #[async_trait]
+        impl HookHandler for TestHookHandler {
+            fn name(&self) -> &str {
+                "test-hook"
+            }
+        }
+
+        let mut api = PluginApi {
+            plugin_id: "test".into(),
+            tools: Vec::new(),
+            hooks: Vec::new(),
+            config: serde_json::Value::Object(serde_json::Map::new()),
+            logger: PluginLogger::new("test"),
+        };
+
+        assert!(api.tools.is_empty());
+        assert!(api.hooks.is_empty());
+
+        api.register_tool(Box::new(TestTool));
+        api.register_hook(Box::new(TestHookHandler));
+
+        assert_eq!(api.tools.len(), 1);
+        assert_eq!(api.hooks.len(), 1);
+        assert_eq!(api.plugin_id(), "test");
+        assert!(api.plugin_config().is_object());
+    }
+
     #[test]
     fn plugin_api_collects_nothing_by_default() {
         let plugin = StubPlugin {

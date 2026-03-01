@@ -369,4 +369,28 @@ mod tests {
         assert!(result.is_err());
         assert!(result.expect_err("error").to_string().contains("cycle"));
     }
+
+    /// REQ-SEC-ROLE-005-SC01
+    #[test]
+    fn unknown_role_denies_access() {
+        let registry = RoleRegistry::built_in();
+        let access = registry.resolve_tool_access("nonexistent_role", "shell", &[]);
+        assert!(!access.allowed);
+        assert!(!access.requires_totp);
+    }
+
+    /// REQ-SEC-ROLE-006-SC01
+    #[test]
+    fn empty_role_or_tool_denies_access() {
+        let registry = RoleRegistry::built_in();
+
+        let empty_role = registry.resolve_tool_access("", "shell", &[]);
+        assert!(!empty_role.allowed);
+
+        let whitespace_role = registry.resolve_tool_access("  ", "shell", &[]);
+        assert!(!whitespace_role.allowed);
+
+        let empty_tool = registry.resolve_tool_access("owner", "", &[]);
+        assert!(!empty_tool.allowed);
+    }
 }

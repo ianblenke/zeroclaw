@@ -143,3 +143,152 @@ impl ProviderUsageMetrics {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_provider(name: &str, status: QuotaStatus) -> ProviderQuotaInfo {
+        ProviderQuotaInfo {
+            provider: name.to_string(),
+            status,
+            failure_count: 0,
+            last_error: None,
+            retry_after_seconds: None,
+            circuit_resets_at: None,
+            profiles: vec![],
+        }
+    }
+
+    fn make_summary(providers: Vec<ProviderQuotaInfo>) -> QuotaSummary {
+        QuotaSummary {
+            timestamp: Utc::now(),
+            providers,
+        }
+    }
+
+    /// REQ-PROV-018-SC01
+    #[test]
+    fn quota_summary_available_providers() {
+        let summary = make_summary(vec![
+            make_provider("openai", QuotaStatus::Ok),
+            make_provider("anthropic", QuotaStatus::RateLimited),
+            make_provider("gemini", QuotaStatus::Ok),
+            make_provider("bedrock", QuotaStatus::CircuitOpen),
+        ]);
+        let available = summary.available_providers();
+        assert_eq!(available, vec!["openai", "gemini"]);
+    }
+
+    /// REQ-PROV-018-SC02
+    #[test]
+    fn quota_summary_rate_limited_providers() {
+        let summary = make_summary(vec![
+            make_provider("openai", QuotaStatus::Ok),
+            make_provider("anthropic", QuotaStatus::RateLimited),
+            make_provider("gemini", QuotaStatus::QuotaExhausted),
+            make_provider("bedrock", QuotaStatus::CircuitOpen),
+        ]);
+        let rate_limited = summary.rate_limited_providers();
+        assert_eq!(rate_limited, vec!["anthropic", "gemini"]);
+    }
+
+    /// REQ-PROV-018-SC03
+    #[test]
+    fn quota_summary_circuit_open_providers() {
+        let summary = make_summary(vec![
+            make_provider("openai", QuotaStatus::Ok),
+            make_provider("anthropic", QuotaStatus::CircuitOpen),
+            make_provider("gemini", QuotaStatus::RateLimited),
+        ]);
+        let circuit_open = summary.circuit_open_providers();
+        assert_eq!(circuit_open, vec!["anthropic"]);
+    }
+
+    /// REQ-PROV-018-SC04
+    #[test]
+    fn quota_summary_empty_providers() {
+        let summary = make_summary(vec![]);
+        assert!(summary.available_providers().is_empty());
+        assert!(summary.rate_limited_providers().is_empty());
+        assert!(summary.circuit_open_providers().is_empty());
+    }
+
+    /// REQ-PROV-018-SC05
+    #[test]
+    fn quota_summary_all_ok() {
+        let summary = make_summary(vec![
+            make_provider("a", QuotaStatus::Ok),
+            make_provider("b", QuotaStatus::Ok),
+        ]);
+        assert_eq!(summary.available_providers().len(), 2);
+        assert!(summary.rate_limited_providers().is_empty());
+        assert!(summary.circuit_open_providers().is_empty());
+    }
+
+    /// REQ-PROV-018-SC06
+    #[test]
+    fn provider_usage_metrics_new() {
+        let metrics = ProviderUsageMetrics::new("openai");
+        assert_eq!(metrics.provider, "openai");
+        assert_eq!(metrics.requests_today, 0);
+        assert_eq!(metrics.cost_usd_today, 0.0);
+    }
+
+    /// REQ-PROV-018-SC07
+    #[test]
+    fn provider_usage_metrics_default() {
+        let metrics = ProviderUsageMetrics::default();
+        assert_eq!(metrics.provider, "");
+        assert_eq!(metrics.requests_session, 0);
+        assert_eq!(metrics.tokens_input_today, 0);
+    }
+
+    /// REQ-PROV-018-SC08
+    #[test]
+    fn quota_status_serde_roundtrip() {
+        let status = QuotaStatus::RateLimited;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"rate_limited\"");
+        let parsed: QuotaStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, QuotaStatus::RateLimited);
+    }
+
+    /// REQ-PROV-018-SC09
+    #[test]
+    fn quota_metadata_construction() {
+        let meta = QuotaMetadata {
+            rate_limit_remaining: Some(100),
+            rate_limit_reset_at: None,
+            retry_after_seconds: Some(30),
+            rate_limit_total: Some(1000),
+        };
+        assert_eq!(meta.rate_limit_remaining, Some(100));
+        assert_eq!(meta.retry_after_seconds, Some(30));
+    }
+
+    /// REQ-PROV-018-SC10
+    #[test]
+    fn provider_quota_info_with_profiles() {
+        let info = ProviderQuotaInfo {
+            provider: "gemini".to_string(),
+            status: QuotaStatus::Ok,
+            failure_count: 0,
+            last_error: None,
+            retry_after_seconds: None,
+            circuit_resets_at: None,
+            profiles: vec![ProfileQuotaInfo {
+                profile_name: "default".to_string(),
+                status: QuotaStatus::Ok,
+                rate_limit_remaining: Some(50),
+                rate_limit_reset_at: None,
+                rate_limit_total: Some(500),
+                account_id: Some("user@example.com".to_string()),
+                token_expires_at: None,
+                plan_type: Some("pro".to_string()),
+            }],
+        };
+        assert_eq!(info.profiles.len(), 1);
+        assert_eq!(info.profiles[0].plan_type, Some("pro".to_string()));
+    }
+}

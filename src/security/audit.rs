@@ -420,4 +420,40 @@ mod tests {
         );
         Ok(())
     }
+
+    /// REQ-SEC-AUDIT-005-SC01
+    #[tokio::test]
+    async fn log_command_compat_writes_same_as_log_command_event() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let config = AuditConfig {
+            enabled: true,
+            max_size_mb: 10,
+            ..Default::default()
+        };
+        let logger = AuditLogger::new(config, tmp.path().to_path_buf())?;
+
+        logger.log_command(
+            "telegram",
+            "ls -la",
+            "low",
+            false,
+            true,
+            true,
+            25,
+        )?;
+
+        let log_path = tmp.path().join("audit.log");
+        let content = tokio::fs::read_to_string(&log_path).await?;
+        let parsed: AuditEvent = serde_json::from_str(content.trim())?;
+
+        let action = parsed.action.unwrap();
+        assert_eq!(action.command, Some("ls -la".to_string()));
+        assert_eq!(action.risk_level, Some("low".to_string()));
+        assert!(action.allowed);
+
+        let result = parsed.result.unwrap();
+        assert!(result.success);
+        assert_eq!(result.duration_ms, Some(25));
+        Ok(())
+    }
 }

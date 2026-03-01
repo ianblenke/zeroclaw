@@ -364,4 +364,17 @@ mod tests {
         let ts = 1_700_000_000u64;
         assert_eq!(first.code_for_timestamp(ts), second.code_for_timestamp(ts));
     }
+
+    /// REQ-SEC-OTP-005-SC01
+    #[test]
+    fn otpauth_uri_format_is_correct() {
+        let dir = tempdir().unwrap();
+        let store = SecretStore::new(dir.path(), true);
+        let (validator, _) = OtpValidator::from_config(&test_config(), dir.path(), &store).unwrap();
+        let uri = validator.otpauth_uri();
+        assert!(uri.starts_with("otpauth://totp/ZeroClaw:zeroclaw"));
+        assert!(uri.contains("issuer=ZeroClaw"));
+        assert!(uri.contains("secret="));
+        assert!(uri.contains("period="));
+    }
 }

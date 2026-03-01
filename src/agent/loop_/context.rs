@@ -80,3 +80,104 @@ pub(super) fn build_hardware_context(
     context.push('\n');
     context
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::{Memory, MemoryCategory, MemoryEntry};
+    use async_trait::async_trait;
+
+    struct MockMemoryWithEntries(Vec<MemoryEntry>);
+
+    #[async_trait]
+    impl Memory for MockMemoryWithEntries {
+        async fn store(
+            &self,
+            _key: &str,
+            _content: &str,
+            _category: MemoryCategory,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn recall(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<Vec<MemoryEntry>> {
+            Ok(self.0.clone())
+        }
+
+        async fn get(&self, _key: &str) -> anyhow::Result<Option<MemoryEntry>> {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _category: Option<&MemoryCategory>,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<Vec<MemoryEntry>> {
+            Ok(vec![])
+        }
+
+        async fn forget(&self, _key: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn count(&self) -> anyhow::Result<usize> {
+            Ok(self.0.len())
+        }
+
+        async fn health_check(&self) -> bool {
+            true
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+    }
+
+    fn entry(key: &str, content: &str, score: Option<f64>) -> MemoryEntry {
+        MemoryEntry {
+            id: "1".into(),
+            key: key.into(),
+            content: content.into(),
+            category: MemoryCategory::Conversation,
+            timestamp: "now".into(),
+            session_id: None,
+            score,
+        }
+    }
+
+    /// REQ-CTX-001-SC01
+    #[tokio::test]
+    async fn build_context_includes_relevant() {
+        let mem = MockMemoryWithEntries(vec![
+            entry("fact1", "User prefers Rust", Some(0.8)),
+        ]);
+        let ctx = build_context(&mem, "hello", 0.5, None).await;
+        assert!(ctx.contains("[Memory context]"));
+        assert!(ctx.contains("fact1"));
+        assert!(ctx.contains("User prefers Rust"));
+    }
+
+    /// REQ-CTX-001-SC02
+    #[tokio::test]
+    async fn build_context_filters_low_score() {
+        let mem = MockMemoryWithEntries(vec![
+            entry("low", "irrelevant", Some(0.1)),
+        ]);
+        let ctx = build_context(&mem, "hello", 0.5, None).await;
+        assert!(ctx.is_empty());
+    }
+
+    /// REQ-CTX-001-SC03
+    #[tokio::test]
+    async fn build_context_empty_memory() {
+        let mem = MockMemoryWithEntries(vec![]);
+        let ctx = build_context(&mem, "hello", 0.5, None).await;
+        assert!(ctx.is_empty());
+    }
+}

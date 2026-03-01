@@ -1,0 +1,9 @@
+[report]
+out = ["Html", "Json"]
+output-dir = "target/tarpaulin"
+
+[config]
+exclude-files = ["tests/*", "benches/*", "src/bin/*"]
+test-timeout = "120s"
+engine = "Ptrace"
+run-types = ["Tests"]

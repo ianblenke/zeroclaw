@@ -950,6 +950,78 @@ mod tests {
         assert!(text.contains("CUSTOM_TOOL_INSTRUCTIONS"));
     }
 
+    /// REQ-PROV-010-SC01
+    #[test]
+    fn stream_chunk_delta_creates_non_final() {
+        let chunk = StreamChunk::delta("hello");
+        assert_eq!(chunk.delta, "hello");
+        assert!(!chunk.is_final);
+        assert_eq!(chunk.token_count, 0);
+    }
+
+    /// REQ-PROV-010-SC02
+    #[test]
+    fn stream_chunk_final_creates_final() {
+        let chunk = StreamChunk::final_chunk();
+        assert!(chunk.delta.is_empty());
+        assert!(chunk.is_final);
+    }
+
+    /// REQ-PROV-010-SC03
+    #[test]
+    fn stream_chunk_error_creates_final_with_message() {
+        let chunk = StreamChunk::error("boom");
+        assert_eq!(chunk.delta, "boom");
+        assert!(chunk.is_final);
+    }
+
+    /// REQ-PROV-010-SC04
+    #[test]
+    fn stream_chunk_with_token_estimate() {
+        let chunk = StreamChunk::delta("12345678").with_token_estimate();
+        assert_eq!(chunk.token_count, 2); // 8 chars / 4 = 2 tokens
+    }
+
+    /// REQ-PROV-011-SC01
+    #[test]
+    fn stream_options_builder() {
+        let opts = StreamOptions::new(true).with_token_count();
+        assert!(opts.enabled);
+        assert!(opts.count_tokens);
+
+        let opts_disabled = StreamOptions::new(false);
+        assert!(!opts_disabled.enabled);
+        assert!(!opts_disabled.count_tokens);
+    }
+
+    /// REQ-PROV-012-SC01
+    #[test]
+    fn is_user_or_assistant_role_classifies_correctly() {
+        assert!(is_user_or_assistant_role("user"));
+        assert!(is_user_or_assistant_role("assistant"));
+        assert!(!is_user_or_assistant_role("system"));
+        assert!(!is_user_or_assistant_role("tool"));
+        assert!(!is_user_or_assistant_role("unknown"));
+    }
+
+    /// REQ-PROV-013-SC01
+    #[tokio::test]
+    async fn provider_default_warmup_succeeds() {
+        let provider = MockProvider {
+            supports_native: false,
+        };
+        assert!(provider.warmup().await.is_ok());
+    }
+
+    /// REQ-PROV-014-SC01
+    #[test]
+    fn provider_default_supports_streaming_is_false() {
+        let provider = MockProvider {
+            supports_native: false,
+        };
+        assert!(!provider.supports_streaming());
+    }
+
     #[tokio::test]
     async fn provider_chat_prompt_guided_rejects_non_prompt_payload() {
         let provider = InvalidConvertProvider;

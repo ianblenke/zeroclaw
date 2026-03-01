@@ -154,4 +154,23 @@ mod tests {
         // Should return some sandbox (at least NoopSandbox)
         assert!(sandbox.is_available());
     }
+
+    /// REQ-SAND-DET-004-SC01
+    #[test]
+    fn unavailable_backend_falls_back_to_noop() {
+        // Request Landlock on a system where it may not be available.
+        // The key contract: create_sandbox never panics and always returns
+        // a valid, available sandbox (falling back to noop if needed).
+        let config = SecurityConfig {
+            sandbox: SandboxConfig {
+                enabled: Some(true),
+                backend: SandboxBackend::Landlock,
+                firejail_args: Vec::new(),
+            },
+            ..Default::default()
+        };
+        let sandbox = create_sandbox(&config);
+        // Must always return *something* that is available
+        assert!(sandbox.is_available());
+    }
 }

@@ -148,6 +148,25 @@ mod tests {
         assert_eq!(MinimalHook.priority(), 0);
     }
 
+    /// REQ-HOOK-004-SC01
+    #[test]
+    fn default_hook_capabilities_empty() {
+        let hook = TestHook::new("test", 0);
+        assert!(hook.capabilities().is_empty());
+    }
+
+    /// REQ-HOOK-005-SC01
+    #[tokio::test]
+    async fn default_void_hooks_complete_without_error() {
+        let hook = TestHook::new("test", 0);
+        hook.on_gateway_start("localhost", 8080).await;
+        hook.on_gateway_stop().await;
+        hook.on_session_start("session-1", "discord").await;
+        hook.on_session_end("session-1", "discord").await;
+        hook.on_heartbeat_tick().await;
+        // If we reach here without panic, all void hooks completed successfully
+    }
+
     #[tokio::test]
     async fn default_modifying_hooks_pass_through() {
         let hook = TestHook::new("test", 0);

@@ -6082,4 +6082,174 @@ Let me check the result."#;
         assert!(completed.contains("✅ shell (2s)"));
         assert!(completed.contains("❌ web_search (1s)"));
     }
+
+    // ── REQ-ORCH-001: Vision Capability Detection ────────────────────
+
+    /// REQ-ORCH-001-SC01
+    #[test]
+    fn vision_capable_anthropic_always_true() {
+        // NonVisionProvider does NOT override supports_vision (defaults to false)
+        let provider = NonVisionProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        assert!(
+            should_treat_provider_as_vision_capable("anthropic", &provider),
+            "anthropic should always be treated as vision-capable"
+        );
+        assert!(
+            should_treat_provider_as_vision_capable("anthropic-custom:foo", &provider),
+            "anthropic-custom: prefix should be vision-capable"
+        );
+        assert!(
+            should_treat_provider_as_vision_capable("ANTHROPIC", &provider),
+            "case-insensitive anthropic match"
+        );
+    }
+
+    /// REQ-ORCH-001-SC02
+    #[test]
+    fn vision_capable_non_anthropic_delegates() {
+        let non_vision = NonVisionProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        assert!(
+            !should_treat_provider_as_vision_capable("openai", &non_vision),
+            "non-anthropic non-vision provider should return false"
+        );
+
+        let vision = VisionProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        assert!(
+            should_treat_provider_as_vision_capable("openai", &vision),
+            "non-anthropic vision provider should return true"
+        );
+    }
+
+    // ── REQ-ORCH-002: Token Estimation ───────────────────────────────
+
+    /// REQ-ORCH-002-SC01
+    #[test]
+    fn estimate_tokens_empty() {
+        let tokens = estimate_prompt_tokens(&[], None);
+        // Should return only framing overhead (64 baseline)
+        assert!(tokens > 0);
+        assert!(tokens < 200);
+    }
+
+    /// REQ-ORCH-002-SC02
+    #[test]
+    fn estimate_tokens_proportional() {
+        let small = vec![ChatMessage::user("hello")];
+        let large = vec![ChatMessage::user(&"x".repeat(4000))];
+        let small_tokens = estimate_prompt_tokens(&small, None);
+        let large_tokens = estimate_prompt_tokens(&large, None);
+        assert!(
+            large_tokens > small_tokens * 2,
+            "4000-char message should estimate significantly more tokens than 5-char message"
+        );
+    }
+
+    // ── REQ-ORCH-003: Model Pricing Lookup ───────────────────────────
+
+    /// REQ-ORCH-003-SC01
+    #[test]
+    fn pricing_exact_match() {
+        let mut prices = HashMap::new();
+        prices.insert(
+            "openai/gpt-4".to_string(),
+            ModelPricing {
+                input: 30.0,
+                output: 60.0,
+            },
+        );
+        let (input, output) = lookup_model_pricing(&prices, "openai", "gpt-4");
+        assert_eq!(input, 30.0);
+        assert_eq!(output, 60.0);
+    }
+
+    /// REQ-ORCH-003-SC02
+    #[test]
+    fn pricing_model_only() {
+        let mut prices = HashMap::new();
+        prices.insert(
+            "gpt-4".to_string(),
+            ModelPricing {
+                input: 10.0,
+                output: 20.0,
+            },
+        );
+        let (input, output) = lookup_model_pricing(&prices, "openai", "gpt-4");
+        assert_eq!(input, 10.0);
+        assert_eq!(output, 20.0);
+    }
+
+    /// REQ-ORCH-003-SC03
+    #[test]
+    fn pricing_default_fallback() {
+        let prices = HashMap::new();
+        let (input, output) = lookup_model_pricing(&prices, "unknown", "unknown-model");
+        assert_eq!(input, 3.0);
+        assert_eq!(output, 15.0);
+    }
+
+    // ── REQ-ORCH-004: Usage Period Labels ────────────────────────────
+
+    /// REQ-ORCH-004-SC01
+    #[test]
+    fn usage_period_labels() {
+        assert_eq!(usage_period_label(UsagePeriod::Session), "session");
+        assert_eq!(usage_period_label(UsagePeriod::Day), "daily");
+        assert_eq!(usage_period_label(UsagePeriod::Month), "monthly");
+    }
+
+    // ── REQ-ORCH-005: Budget Exceeded Message ────────────────────────
+
+    /// REQ-ORCH-005-SC01
+    #[test]
+    fn budget_message_format() {
+        let msg = budget_exceeded_message("gpt-4", 0.05, 0.90, 1.00, UsagePeriod::Session);
+        assert!(msg.contains("gpt-4"));
+        assert!(msg.contains("session"));
+        assert!(msg.contains("$1.00"));
+        assert!(msg.contains("$0.90"));
+    }
+
+    // ── REQ-ORCH-006: Error Classification ───────────────────────────
+
+    /// REQ-ORCH-006-SC01
+    #[test]
+    fn error_classify_tool_loop_cancelled() {
+        let err: anyhow::Error = ToolLoopCancelled.into();
+        assert!(is_tool_loop_cancelled(&err));
+        assert!(!is_tool_iteration_limit_error(&err));
+        assert!(!is_loop_detection_error(&err));
+    }
+
+    /// REQ-ORCH-006-SC02
+    #[test]
+    fn error_classify_iteration_limit() {
+        let err = anyhow::anyhow!("Agent exceeded maximum tool iterations (50)");
+        assert!(is_tool_iteration_limit_error(&err));
+        assert!(!is_tool_loop_cancelled(&err));
+        assert!(!is_loop_detection_error(&err));
+    }
+
+    /// REQ-ORCH-006-SC03
+    #[test]
+    fn error_classify_loop_detection() {
+        let err = anyhow::anyhow!("Agent stopped early due to detected loop pattern in tool calls");
+        assert!(is_loop_detection_error(&err));
+        assert!(!is_tool_loop_cancelled(&err));
+        assert!(!is_tool_iteration_limit_error(&err));
+    }
+
+    /// REQ-ORCH-006-SC04
+    #[test]
+    fn error_classify_non_matching() {
+        let err = anyhow::anyhow!("some random error");
+        assert!(!is_tool_loop_cancelled(&err));
+        assert!(!is_tool_iteration_limit_error(&err));
+        assert!(!is_loop_detection_error(&err));
+    }
 }

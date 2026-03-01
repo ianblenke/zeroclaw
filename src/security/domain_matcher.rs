@@ -256,4 +256,14 @@ mod tests {
             .expect_err("expected unknown category rejection");
         assert!(err.to_string().contains("Unknown OTP domain category"));
     }
+
+    /// REQ-SEC-DOM-005-SC01
+    #[test]
+    fn url_with_port_and_path_normalizes() {
+        let matcher =
+            DomainMatcher::new(&["accounts.google.com".to_string()], &[] as &[String]).unwrap();
+        assert!(matcher.is_gated("https://accounts.google.com:443/login?next=/home"));
+        assert!(matcher.is_gated("http://user@accounts.google.com/auth#fragment"));
+        assert!(matcher.is_gated("accounts.google.com."));
+    }
 }

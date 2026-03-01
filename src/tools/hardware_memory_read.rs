@@ -143,6 +143,133 @@ fn parse_hex_address(s: &str) -> Option<u64> {
     u64::from_str_radix(s, 16).ok()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REQ-HW-002-SC01
+    #[test]
+    fn tool_name_and_description() {
+        let tool = HardwareMemoryReadTool::new(vec!["nucleo-f401re".into()]);
+        assert_eq!(tool.name(), "hardware_memory_read");
+        assert!(!tool.description().is_empty());
+    }
+
+    /// REQ-HW-002-SC02
+    #[test]
+    fn parameters_schema_has_required_properties() {
+        let tool = HardwareMemoryReadTool::new(vec![]);
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["address"].is_object());
+        assert!(schema["properties"]["length"].is_object());
+        assert!(schema["properties"]["board"].is_object());
+    }
+
+    /// REQ-HW-002-SC03
+    #[test]
+    fn parse_hex_with_0x_prefix() {
+        assert_eq!(parse_hex_address("0x20000000"), Some(0x2000_0000));
+        assert_eq!(parse_hex_address("0X20000000"), Some(0x2000_0000));
+    }
+
+    /// REQ-HW-002-SC04
+    #[test]
+    fn parse_hex_without_prefix() {
+        assert_eq!(parse_hex_address("20000000"), Some(0x2000_0000));
+        assert_eq!(parse_hex_address("FF"), Some(0xFF));
+    }
+
+    /// REQ-HW-002-SC05
+    #[test]
+    fn parse_hex_with_whitespace() {
+        assert_eq!(parse_hex_address("  0x100  "), Some(0x100));
+    }
+
+    /// REQ-HW-002-SC06
+    #[test]
+    fn parse_hex_invalid_returns_none() {
+        assert_eq!(parse_hex_address("not_hex"), None);
+        assert_eq!(parse_hex_address("0xGG"), None);
+    }
+
+    /// REQ-HW-002-SC07
+    #[test]
+    fn chip_for_board_known() {
+        assert_eq!(
+            HardwareMemoryReadTool::chip_for_board("nucleo-f401re"),
+            Some("STM32F401RETx")
+        );
+        assert_eq!(
+            HardwareMemoryReadTool::chip_for_board("nucleo-f411re"),
+            Some("STM32F411RETx")
+        );
+    }
+
+    /// REQ-HW-002-SC08
+    #[test]
+    fn chip_for_board_unknown() {
+        assert_eq!(HardwareMemoryReadTool::chip_for_board("esp32"), None);
+        assert_eq!(HardwareMemoryReadTool::chip_for_board("rpi-gpio"), None);
+    }
+
+    /// REQ-HW-002-SC09
+    #[tokio::test]
+    async fn execute_no_boards_returns_error() {
+        let tool = HardwareMemoryReadTool::new(vec![]);
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("No peripherals"));
+    }
+
+    /// REQ-HW-002-SC10
+    #[tokio::test]
+    async fn execute_unsupported_board_returns_error() {
+        let tool = HardwareMemoryReadTool::new(vec!["esp32".into()]);
+        let result = tool.execute(serde_json::json!({"board": "esp32"})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("only supports"));
+    }
+
+    /// REQ-HW-002-SC11
+    #[tokio::test]
+    async fn execute_without_probe_feature_returns_error() {
+        // Without the "probe" feature, execute should return a build feature error
+        let tool = HardwareMemoryReadTool::new(vec!["nucleo-f401re".into()]);
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        // Without probe feature, this returns an error about needing the feature
+        #[cfg(not(feature = "probe"))]
+        {
+            assert!(!result.success);
+            assert!(result.error.as_ref().unwrap().contains("probe feature"));
+        }
+        #[cfg(feature = "probe")]
+        {
+            // With probe feature, it would try to connect — just check it returns
+            let _ = result;
+        }
+    }
+
+    /// REQ-HW-002-SC12
+    #[tokio::test]
+    async fn execute_defaults_to_first_board() {
+        let tool = HardwareMemoryReadTool::new(vec!["nucleo-f401re".into()]);
+        // Without probe feature, it will fail but with the correct board selected
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        #[cfg(not(feature = "probe"))]
+        {
+            assert!(!result.success);
+            assert!(result.error.as_ref().unwrap().contains("probe feature"));
+        }
+    }
+
+    /// REQ-HW-002-SC13
+    #[test]
+    fn nucleo_ram_base_constant() {
+        assert_eq!(NUCLEO_RAM_BASE, 0x2000_0000);
+    }
+}
+
 #[cfg(feature = "probe")]
 fn probe_read_memory(chip: &str, address: u64, length: usize) -> anyhow::Result<String> {
     use probe_rs::MemoryInterface;

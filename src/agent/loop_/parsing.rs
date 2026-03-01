@@ -1691,3 +1691,759 @@ pub(super) fn parse_structured_tool_calls(tool_calls: &[ToolCall]) -> Vec<Parsed
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── REQ-PARSE-001: Argument Parsing ──────────────────────────────
+
+    /// REQ-PARSE-001-SC01
+    #[test]
+    fn parse_arguments_value_json_string() {
+        let raw = json!(r#"{"command":"ls"}"#);
+        let result = parse_arguments_value(Some(&raw));
+        assert_eq!(result, json!({"command": "ls"}));
+    }
+
+    /// REQ-PARSE-001-SC02
+    #[test]
+    fn parse_arguments_value_object_passthrough() {
+        let raw = json!({"command": "ls"});
+        let result = parse_arguments_value(Some(&raw));
+        assert_eq!(result, json!({"command": "ls"}));
+    }
+
+    /// REQ-PARSE-001-SC03
+    #[test]
+    fn parse_arguments_value_none_returns_empty() {
+        let result = parse_arguments_value(None);
+        assert_eq!(result, json!({}));
+    }
+
+    /// REQ-PARSE-001-SC04
+    #[test]
+    fn parse_arguments_value_invalid_json_returns_empty() {
+        let raw = json!("this is not json");
+        let result = parse_arguments_value(Some(&raw));
+        assert_eq!(result, json!({}));
+    }
+
+    // ── REQ-PARSE-002: Shell Command Normalization ───────────────────
+
+    /// REQ-PARSE-002-SC01
+    #[test]
+    fn shell_normalize_plain_command() {
+        assert_eq!(
+            normalize_shell_command_from_raw("ls -la"),
+            Some("ls -la".to_string())
+        );
+    }
+
+    /// REQ-PARSE-002-SC02
+    #[test]
+    fn shell_normalize_strips_quotes() {
+        assert_eq!(
+            normalize_shell_command_from_raw("\"echo hello\""),
+            Some("echo hello".to_string())
+        );
+        assert_eq!(
+            normalize_shell_command_from_raw("'echo hello'"),
+            Some("echo hello".to_string())
+        );
+    }
+
+    /// REQ-PARSE-002-SC03
+    #[test]
+    fn shell_normalize_url_to_curl() {
+        let result = normalize_shell_command_from_raw("https://example.com/api");
+        assert!(result.is_some());
+        let cmd = result.unwrap();
+        assert!(cmd.starts_with("curl -s"));
+        assert!(cmd.contains("example.com"));
+    }
+
+    /// REQ-PARSE-002-SC04
+    #[test]
+    fn shell_normalize_empty_returns_none() {
+        assert_eq!(normalize_shell_command_from_raw(""), None);
+        assert_eq!(normalize_shell_command_from_raw("   "), None);
+        assert_eq!(normalize_shell_command_from_raw("\"\""), None);
+    }
+
+    /// REQ-PARSE-002-SC05
+    #[test]
+    fn shell_normalize_json_returns_none() {
+        assert_eq!(
+            normalize_shell_command_from_raw(r#"{"key": "value"}"#),
+            None
+        );
+        assert_eq!(normalize_shell_command_from_raw("[1,2,3]"), None);
+    }
+
+    // ── REQ-PARSE-003: Shell Arguments Normalization ─────────────────
+
+    /// REQ-PARSE-003-SC01
+    #[test]
+    fn shell_args_command_key_preserved() {
+        let args = json!({"command": "echo hi"});
+        let result = normalize_shell_arguments(args.clone(), None);
+        assert_eq!(result, args);
+    }
+
+    /// REQ-PARSE-003-SC02
+    #[test]
+    fn shell_args_alias_mapped_to_command() {
+        for alias in ["cmd", "script", "bash", "sh", "input"] {
+            let args = json!({alias: "echo test"});
+            let result = normalize_shell_arguments(args, None);
+            assert_eq!(
+                result.get("command").and_then(|v| v.as_str()),
+                Some("echo test"),
+                "alias {alias} should map to command"
+            );
+        }
+    }
+
+    /// REQ-PARSE-003-SC03
+    #[test]
+    fn shell_args_url_to_curl() {
+        let args = json!({"url": "https://example.com"});
+        let result = normalize_shell_arguments(args, None);
+        let cmd = result.get("command").and_then(|v| v.as_str()).unwrap();
+        assert!(cmd.starts_with("curl -s"));
+    }
+
+    /// REQ-PARSE-003-SC04
+    #[test]
+    fn shell_args_string_to_command() {
+        let args = json!("echo hello");
+        let result = normalize_shell_arguments(args, None);
+        assert_eq!(
+            result.get("command").and_then(|v| v.as_str()),
+            Some("echo hello")
+        );
+    }
+
+    // ── REQ-PARSE-004: Tool Name Aliasing ────────────────────────────
+
+    /// REQ-PARSE-004-SC01
+    #[test]
+    fn alias_shell_variants() {
+        for name in [
+            "bash",
+            "sh",
+            "exec",
+            "command",
+            "cmd",
+            "browser_open",
+            "browser",
+            "web_search",
+        ] {
+            assert_eq!(map_tool_name_alias(name), "shell", "alias for {name}");
+        }
+    }
+
+    /// REQ-PARSE-004-SC02
+    #[test]
+    fn alias_file_read_variants() {
+        for name in ["fileread", "readfile", "read_file", "file"] {
+            assert_eq!(map_tool_name_alias(name), "file_read", "alias for {name}");
+        }
+    }
+
+    /// REQ-PARSE-004-SC03
+    #[test]
+    fn alias_memory_variants() {
+        for name in ["memoryrecall", "recall", "memrecall"] {
+            assert_eq!(
+                map_tool_name_alias(name),
+                "memory_recall",
+                "alias for {name}"
+            );
+        }
+    }
+
+    /// REQ-PARSE-004-SC04
+    #[test]
+    fn alias_unknown_passthrough() {
+        assert_eq!(map_tool_name_alias("my_custom_tool"), "my_custom_tool");
+        assert_eq!(map_tool_name_alias("foobar"), "foobar");
+    }
+
+    // ── REQ-PARSE-005: XML Pair Extraction ───────────────────────────
+
+    /// REQ-PARSE-005-SC01
+    #[test]
+    fn xml_pairs_single() {
+        let pairs = extract_xml_pairs("<shell>pwd</shell>");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], ("shell", "pwd"));
+    }
+
+    /// REQ-PARSE-005-SC02
+    #[test]
+    fn xml_pairs_multiple() {
+        let input = "<query>search term</query><path>/tmp/file.txt</path>";
+        let pairs = extract_xml_pairs(input);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0, "query");
+        assert_eq!(pairs[1].0, "path");
+    }
+
+    /// REQ-PARSE-005-SC03
+    #[test]
+    fn xml_pairs_unclosed_skipped() {
+        let pairs = extract_xml_pairs("<shell>pwd");
+        assert!(pairs.is_empty());
+    }
+
+    // ── REQ-PARSE-006: XML Meta Tag Detection ────────────────────────
+
+    /// REQ-PARSE-006-SC01
+    #[test]
+    fn meta_tags_detected() {
+        for tag in [
+            "tool_call",
+            "toolcall",
+            "tool-call",
+            "invoke",
+            "thinking",
+            "thought",
+            "analysis",
+            "reasoning",
+            "reflection",
+        ] {
+            assert!(is_xml_meta_tag(tag), "{tag} should be meta");
+        }
+        // Case-insensitive
+        assert!(is_xml_meta_tag("TOOL_CALL"));
+        assert!(is_xml_meta_tag("Thinking"));
+    }
+
+    /// REQ-PARSE-006-SC02
+    #[test]
+    fn tool_names_not_meta() {
+        for tag in ["shell", "file_read", "memory_recall", "http_request"] {
+            assert!(!is_xml_meta_tag(tag), "{tag} should NOT be meta");
+        }
+    }
+
+    // ── REQ-PARSE-007: XML Tool Call Parsing ─────────────────────────
+
+    /// REQ-PARSE-007-SC01
+    #[test]
+    fn xml_tool_calls_nested_args() {
+        let input = "<memory_recall><query>test query</query></memory_recall>";
+        let calls = parse_xml_tool_calls(input).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "memory_recall");
+        assert_eq!(
+            calls[0].arguments.get("query").and_then(|v| v.as_str()),
+            Some("test query")
+        );
+    }
+
+    /// REQ-PARSE-007-SC02
+    #[test]
+    fn xml_tool_calls_json_body() {
+        let input = r#"<shell>{"command":"ls -la"}</shell>"#;
+        let calls = parse_xml_tool_calls(input).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("ls -la")
+        );
+    }
+
+    /// REQ-PARSE-007-SC03
+    #[test]
+    fn xml_tool_calls_meta_skipped() {
+        // tool_call is a meta tag and should be skipped;
+        // the inner content should still parse
+        let input = "<tool_call><shell>pwd</shell></tool_call>";
+        // parse_xml_tool_calls skips meta tags, so it should find shell inside
+        let result = parse_xml_tool_calls(input);
+        // The tool_call meta tag is skipped, inner shell tag should be found
+        assert!(result.is_some());
+        let calls = result.unwrap();
+        assert_eq!(calls[0].name, "shell");
+    }
+
+    // ── REQ-PARSE-008: JSON Value Extraction ─────────────────────────
+
+    /// REQ-PARSE-008-SC01
+    #[test]
+    fn json_extract_standalone() {
+        let values = extract_json_values(r#"{"name":"shell"}"#);
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], json!({"name": "shell"}));
+    }
+
+    /// REQ-PARSE-008-SC02
+    #[test]
+    fn json_extract_embedded() {
+        let input = r#"Here is a tool call: {"name":"shell","arguments":{"command":"ls"}} done."#;
+        let values = extract_json_values(input);
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].get("name").and_then(|v| v.as_str()), Some("shell"));
+    }
+
+    /// REQ-PARSE-008-SC03
+    #[test]
+    fn json_extract_empty() {
+        assert!(extract_json_values("").is_empty());
+        assert!(extract_json_values("   ").is_empty());
+    }
+
+    // ── REQ-PARSE-009: JSON End Finder ───────────────────────────────
+
+    /// REQ-PARSE-009-SC01
+    #[test]
+    fn json_end_simple() {
+        let input = r#"{"key":"value"} trailing"#;
+        let end = find_json_end(input).unwrap();
+        assert_eq!(&input[..end], r#"{"key":"value"}"#);
+    }
+
+    /// REQ-PARSE-009-SC02
+    #[test]
+    fn json_end_nested() {
+        let input = r#"{"a":{"b":"c"}} trailing"#;
+        let end = find_json_end(input).unwrap();
+        assert_eq!(&input[..end], r#"{"a":{"b":"c"}}"#);
+    }
+
+    /// REQ-PARSE-009-SC03
+    #[test]
+    fn json_end_escaped_braces() {
+        let input = r#"{"msg":"hello {world}"} trailing"#;
+        let end = find_json_end(input).unwrap();
+        assert_eq!(&input[..end], r#"{"msg":"hello {world}"}"#);
+    }
+
+    /// REQ-PARSE-009-SC04
+    #[test]
+    fn json_end_non_object() {
+        assert!(find_json_end("not json").is_none());
+        assert!(find_json_end("[1,2,3]").is_none());
+    }
+
+    // ── REQ-PARSE-010: Build Curl Command ────────────────────────────
+
+    /// REQ-PARSE-010-SC01
+    #[test]
+    fn curl_valid_url() {
+        let result = build_curl_command("https://example.com/api");
+        assert_eq!(result, Some("curl -s 'https://example.com/api'".to_string()));
+
+        let result = build_curl_command("http://localhost:8080");
+        assert_eq!(result, Some("curl -s 'http://localhost:8080'".to_string()));
+    }
+
+    /// REQ-PARSE-010-SC02
+    #[test]
+    fn curl_non_url() {
+        assert_eq!(build_curl_command("ls -la"), None);
+        assert_eq!(build_curl_command("ftp://server/file"), None);
+    }
+
+    /// REQ-PARSE-010-SC03
+    #[test]
+    fn curl_url_with_whitespace() {
+        assert_eq!(build_curl_command("https://example.com/path with spaces"), None);
+    }
+
+    // ── REQ-PARSE-011: Default Parameter for Tool ────────────────────
+
+    /// REQ-PARSE-011-SC01
+    #[test]
+    fn default_param_shell() {
+        for tool in ["shell", "bash", "sh", "exec", "command", "cmd"] {
+            assert_eq!(default_param_for_tool(tool), "command", "tool {tool}");
+        }
+    }
+
+    /// REQ-PARSE-011-SC02
+    #[test]
+    fn default_param_file() {
+        for tool in ["file_read", "file_write", "file_list", "fileread", "writefile"] {
+            assert_eq!(default_param_for_tool(tool), "path", "tool {tool}");
+        }
+    }
+
+    /// REQ-PARSE-011-SC03
+    #[test]
+    fn default_param_memory() {
+        assert_eq!(default_param_for_tool("memory_recall"), "query");
+        assert_eq!(default_param_for_tool("recall"), "query");
+        assert_eq!(default_param_for_tool("memory_store"), "content");
+        assert_eq!(default_param_for_tool("memory_observe"), "observation");
+    }
+
+    /// REQ-PARSE-011-SC04
+    #[test]
+    fn default_param_unknown() {
+        assert_eq!(default_param_for_tool("my_custom_tool"), "input");
+        assert_eq!(default_param_for_tool("foobar"), "input");
+    }
+
+    // ── REQ-PARSE-012: Tool Call Signature ───────────────────────────
+
+    /// REQ-PARSE-012-SC01
+    #[test]
+    fn signature_sorts_keys() {
+        let unsorted = json!({"z": 1, "a": 2, "m": 3});
+        let canonical = canonicalize_json_for_tool_signature(&unsorted);
+        let keys: Vec<&String> = canonical.as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["a", "m", "z"]);
+    }
+
+    /// REQ-PARSE-012-SC02
+    #[test]
+    fn signature_lowercase_name() {
+        let (name, _args) = tool_call_signature("SHELL", &json!({"command": "ls"}));
+        assert_eq!(name, "shell");
+    }
+
+    // ── REQ-PARSE-013: GLM Shortened Body Parsing ────────────────────
+
+    /// REQ-PARSE-013-SC01
+    #[test]
+    fn glm_shortened_single_value() {
+        let call = parse_glm_shortened_body("shell>ls -la").unwrap();
+        assert_eq!(call.name, "shell");
+        assert_eq!(
+            call.arguments.get("command").and_then(|v| v.as_str()),
+            Some("ls -la")
+        );
+    }
+
+    /// REQ-PARSE-013-SC02
+    #[test]
+    fn glm_shortened_yaml_multiline() {
+        let body = "file_read>\npath: /tmp/test.txt\nencoding: utf-8";
+        let call = parse_glm_shortened_body(body).unwrap();
+        assert_eq!(call.name, "file_read");
+        assert_eq!(
+            call.arguments.get("path").and_then(|v| v.as_str()),
+            Some("/tmp/test.txt")
+        );
+        assert_eq!(
+            call.arguments.get("encoding").and_then(|v| v.as_str()),
+            Some("utf-8")
+        );
+    }
+
+    /// REQ-PARSE-013-SC03
+    #[test]
+    fn glm_shortened_attribute_style() {
+        let body = r#"shell command="ls -la" description="list files""#;
+        let call = parse_glm_shortened_body(body).unwrap();
+        assert_eq!(call.name, "shell");
+        assert_eq!(
+            call.arguments.get("command").and_then(|v| v.as_str()),
+            Some("ls -la")
+        );
+    }
+
+    /// REQ-PARSE-013-SC04
+    #[test]
+    fn glm_shortened_url_to_curl() {
+        let call = parse_glm_shortened_body("shell>https://example.com").unwrap();
+        assert_eq!(call.name, "shell");
+        let cmd = call.arguments.get("command").and_then(|v| v.as_str()).unwrap();
+        assert!(cmd.starts_with("curl -s"));
+        assert!(cmd.contains("example.com"));
+    }
+
+    /// REQ-PARSE-013-SC05
+    #[test]
+    fn glm_shortened_empty() {
+        assert!(parse_glm_shortened_body("").is_none());
+        assert!(parse_glm_shortened_body("   ").is_none());
+    }
+
+    // ── REQ-PARSE-014: Main Parse Entry Point ────────────────────────
+
+    /// REQ-PARSE-014-SC01
+    #[test]
+    fn parse_openai_json_format() {
+        let response = json!({
+            "tool_calls": [{
+                "function": {
+                    "name": "shell",
+                    "arguments": "{\"command\":\"ls\"}"
+                },
+                "id": "call_123"
+            }]
+        })
+        .to_string();
+        let (text, calls) = parse_tool_calls(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("ls")
+        );
+        assert_eq!(calls[0].tool_call_id, Some("call_123".to_string()));
+        assert!(text.is_empty());
+    }
+
+    /// REQ-PARSE-014-SC02
+    #[test]
+    fn parse_xml_tag_format() {
+        let response =
+            r#"<tool_call>{"name":"shell","arguments":{"command":"pwd"}}</tool_call>"#;
+        let (text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("pwd")
+        );
+        assert!(text.is_empty());
+    }
+
+    /// REQ-PARSE-014-SC03
+    #[test]
+    fn parse_markdown_tool_call() {
+        let response = "```tool_call\n{\"name\":\"shell\",\"arguments\":{\"command\":\"date\"}}\n```";
+        let (_text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+    }
+
+    /// REQ-PARSE-014-SC04
+    #[test]
+    fn parse_preserves_surrounding_text() {
+        let response = "Here is the result:\n<tool_call>{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}</tool_call>\nDone!";
+        let (text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert!(text.contains("Here is the result:"));
+        assert!(text.contains("Done!"));
+    }
+
+    /// REQ-PARSE-014-SC05
+    #[test]
+    fn parse_plain_text_no_calls() {
+        let response = "The answer to your question is 42.";
+        let (text, calls) = parse_tool_calls(response);
+        assert!(calls.is_empty());
+        assert_eq!(text, response);
+    }
+
+    // ── REQ-PARSE-015: Tool Call Parse Issue Detection ────────────────
+
+    /// REQ-PARSE-015-SC01
+    #[test]
+    fn detect_issue_unparsed_tool_call() {
+        let response = "<tool_call>malformed content here</tool_call>";
+        let result = detect_tool_call_parse_issue(response, &[]);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("tool-call payload"));
+    }
+
+    /// REQ-PARSE-015-SC02
+    #[test]
+    fn detect_issue_clean_text() {
+        let result = detect_tool_call_parse_issue("Hello, world!", &[]);
+        assert!(result.is_none());
+    }
+
+    /// REQ-PARSE-015-SC03
+    #[test]
+    fn detect_issue_parsed_ok() {
+        let calls = vec![ParsedToolCall {
+            name: "shell".to_string(),
+            arguments: json!({"command": "ls"}),
+            tool_call_id: None,
+        }];
+        let result = detect_tool_call_parse_issue("<tool_call>...</tool_call>", &calls);
+        assert!(result.is_none());
+    }
+
+    // ── REQ-PARSE-016: Structured Tool Call Parsing ──────────────────
+
+    /// REQ-PARSE-016-SC01
+    #[test]
+    fn structured_valid_call() {
+        let tool_calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "shell".to_string(),
+            arguments: r#"{"command":"ls"}"#.to_string(),
+        }];
+        let result = parse_structured_tool_calls(&tool_calls);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "shell");
+        assert_eq!(
+            result[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("ls")
+        );
+        assert_eq!(result[0].tool_call_id, Some("call_1".to_string()));
+    }
+
+    /// REQ-PARSE-016-SC02
+    #[test]
+    fn structured_invalid_args() {
+        let tool_calls = vec![ToolCall {
+            id: "call_2".to_string(),
+            name: "shell".to_string(),
+            arguments: "not json".to_string(),
+        }];
+        let result = parse_structured_tool_calls(&tool_calls);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "shell");
+        // Invalid JSON falls back to empty; then raw_string_hint "not json"
+        // may be used for shell normalization
+        assert!(result[0].arguments.is_object());
+    }
+
+    // ── REQ-PARSE-017: MiniMax Invoke Parsing ────────────────────────
+
+    /// REQ-PARSE-017-SC01
+    #[test]
+    fn minimax_standard_invoke() {
+        let response =
+            r#"<invoke name="shell"><parameter name="command">pwd</parameter></invoke>"#;
+        let (text, calls) = parse_minimax_invoke_calls(response).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("pwd")
+        );
+        assert!(text.is_empty());
+    }
+
+    /// REQ-PARSE-017-SC02
+    #[test]
+    fn minimax_no_invoke() {
+        assert!(parse_minimax_invoke_calls("Just some plain text").is_none());
+    }
+
+    // ── REQ-PARSE-018: Perl-Style Tool Call Parsing ──────────────────
+
+    /// REQ-PARSE-018-SC01
+    #[test]
+    fn perl_style_standard() {
+        let response = r#"TOOL_CALL
+{tool => "shell", args => {
+  --command "ls -la"
+  --description "list dir"
+}}
+/TOOL_CALL"#;
+        let calls = parse_perl_style_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("ls -la")
+        );
+    }
+
+    // ── REQ-PARSE-019: FunctionCall-Style Parsing ────────────────────
+
+    /// REQ-PARSE-019-SC01
+    #[test]
+    fn function_call_standard() {
+        let response = "<FunctionCall>\nfile_read\n<code>path>/tmp/file.txt</code>\n</FunctionCall>";
+        let calls = parse_function_call_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_read");
+        assert_eq!(
+            calls[0].arguments.get("path").and_then(|v| v.as_str()),
+            Some("/tmp/file.txt")
+        );
+    }
+
+    // ── REQ-PARSE-020: XML Attribute Tool Call Parsing ────────────────
+
+    /// REQ-PARSE-020-SC01
+    #[test]
+    fn xml_attribute_standard() {
+        let response = r#"<invoke name="shell"><parameter name="command">ls</parameter></invoke>"#;
+        let calls = parse_xml_attribute_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("ls")
+        );
+    }
+
+    // ── REQ-PARSE-021: Tool Call ID Parsing ──────────────────────────
+
+    /// REQ-PARSE-021-SC01
+    #[test]
+    fn tool_call_id_from_function() {
+        let root = json!({"function": {"id": "fn_id_123", "name": "shell"}});
+        let func = root.get("function");
+        let id = parse_tool_call_id(&root, func);
+        assert_eq!(id, Some("fn_id_123".to_string()));
+    }
+
+    /// REQ-PARSE-021-SC02
+    #[test]
+    fn tool_call_id_from_root() {
+        let root = json!({"id": "root_id_456", "name": "shell"});
+        let id = parse_tool_call_id(&root, None);
+        assert_eq!(id, Some("root_id_456".to_string()));
+
+        let root2 = json!({"tool_call_id": "tc_789", "name": "shell"});
+        let id2 = parse_tool_call_id(&root2, None);
+        assert_eq!(id2, Some("tc_789".to_string()));
+
+        let root3 = json!({"call_id": "ci_012", "name": "shell"});
+        let id3 = parse_tool_call_id(&root3, None);
+        assert_eq!(id3, Some("ci_012".to_string()));
+    }
+
+    /// REQ-PARSE-021-SC03
+    #[test]
+    fn tool_call_id_none() {
+        let root = json!({"name": "shell"});
+        let id = parse_tool_call_id(&root, None);
+        assert!(id.is_none());
+    }
+
+    // ── REQ-PARSE-022: Close Tag Matching ────────────────────────────
+
+    /// REQ-PARSE-022-SC01
+    #[test]
+    fn close_tag_matching() {
+        assert_eq!(
+            matching_tool_call_close_tag("<tool_call>"),
+            Some("</tool_call>")
+        );
+        assert_eq!(
+            matching_tool_call_close_tag("<toolcall>"),
+            Some("</toolcall>")
+        );
+        assert_eq!(
+            matching_tool_call_close_tag("<tool-call>"),
+            Some("</tool-call>")
+        );
+        assert_eq!(
+            matching_tool_call_close_tag("<invoke>"),
+            Some("</invoke>")
+        );
+        assert_eq!(
+            matching_tool_call_close_tag("<minimax:tool_call>"),
+            Some("</minimax:tool_call>")
+        );
+        assert_eq!(
+            matching_tool_call_close_tag("<minimax:toolcall>"),
+            Some("</minimax:toolcall>")
+        );
+    }
+
+    /// REQ-PARSE-022-SC02
+    #[test]
+    fn close_tag_unknown() {
+        assert!(matching_tool_call_close_tag("<unknown>").is_none());
+        assert!(matching_tool_call_close_tag("not a tag").is_none());
+    }
+}

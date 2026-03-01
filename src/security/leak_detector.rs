@@ -532,4 +532,18 @@ MIIEowIBAAKCAQEA0ZPr5JeyVDonXsKhfq...
         let high = shannon_entropy(b"aB3f9K1mP0qX8vT2nR6sW4yZ7uH5");
         assert!(high > low);
     }
+
+    /// REQ-SEC-LEAK-006-SC01
+    #[test]
+    fn detects_github_tokens() {
+        let detector = LeakDetector::new();
+        let content = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn";
+        let result = detector.scan(content);
+        match result {
+            LeakResult::Detected { patterns, .. } => {
+                assert!(patterns.iter().any(|p| p.contains("GitHub")));
+            }
+            LeakResult::Clean => panic!("Should detect GitHub token"),
+        }
+    }
 }

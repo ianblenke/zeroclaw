@@ -133,6 +133,67 @@ mod tests {
         assert_eq!(conversation, "\"conversation\"");
     }
 
+    /// REQ-MEM-004-SC01
+    #[tokio::test]
+    async fn memory_reindex_default_bails() {
+        struct StubMemory;
+        #[async_trait]
+        impl Memory for StubMemory {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            async fn store(
+                &self,
+                _key: &str,
+                _content: &str,
+                _category: MemoryCategory,
+                _session_id: Option<&str>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn recall(
+                &self,
+                _query: &str,
+                _limit: usize,
+                _session_id: Option<&str>,
+            ) -> anyhow::Result<Vec<MemoryEntry>> {
+                Ok(vec![])
+            }
+            async fn get(&self, _key: &str) -> anyhow::Result<Option<MemoryEntry>> {
+                Ok(None)
+            }
+            async fn list(
+                &self,
+                _category: Option<&MemoryCategory>,
+                _session_id: Option<&str>,
+            ) -> anyhow::Result<Vec<MemoryEntry>> {
+                Ok(vec![])
+            }
+            async fn forget(&self, _key: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            async fn count(&self) -> anyhow::Result<usize> {
+                Ok(0)
+            }
+            async fn health_check(&self) -> bool {
+                true
+            }
+        }
+
+        let mem = StubMemory;
+        let err = mem.reindex(None).await.unwrap_err();
+        assert!(err.to_string().contains("not supported"));
+    }
+
+    /// REQ-MEM-005-SC01
+    #[test]
+    fn memory_category_custom_serde_roundtrip() {
+        let custom = MemoryCategory::Custom("project_notes".into());
+        let json = serde_json::to_string(&custom).unwrap();
+        let parsed: MemoryCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, MemoryCategory::Custom("project_notes".into()));
+    }
+
     #[test]
     fn memory_entry_roundtrip_preserves_optional_fields() {
         let entry = MemoryEntry {

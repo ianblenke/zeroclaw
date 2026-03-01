@@ -1,0 +1,21 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Rust (async/await, tokio), trait-driven architecture
+  We use conventional commits
+  Domain: autonomous agent runtime (LLM providers, messaging channels, tool execution)
+  Testing: manual mock structs (no mockall), async_trait, tempfile, wiremock
+  Coverage tool: cargo-tarpaulin
+  Each spec scenario maps 1:1 to a test function
+
+rules:
+  proposal:
+    - Keep proposals under 500 words
+    - Always include a "Non-goals" section
+  specs:
+    - Every requirement MUST have at least one WHEN/THEN scenario
+    - Each scenario MUST reference a test function name and file path
+    - Use MUST/SHALL for normative requirements
+  tasks:
+    - Break tasks into chunks completable in one session
+    - Order tasks by dependency

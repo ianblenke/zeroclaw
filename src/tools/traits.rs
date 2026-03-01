@@ -104,6 +104,36 @@ mod tests {
         assert!(result.error.is_none());
     }
 
+    /// REQ-TOOL-004-SC01
+    #[test]
+    fn tool_spec_serialization_roundtrip() {
+        let spec = ToolSpec {
+            name: "file_read".into(),
+            description: "Read a file".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: ToolSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "file_read");
+        assert_eq!(parsed.description, "Read a file");
+        assert_eq!(parsed.parameters["type"], "object");
+    }
+
+    /// REQ-TOOL-005-SC01
+    #[test]
+    fn tool_result_success_without_error() {
+        let result = ToolResult {
+            success: true,
+            output: "done".into(),
+            error: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ToolResult = serde_json::from_str(&json).unwrap();
+        assert!(parsed.success);
+        assert_eq!(parsed.output, "done");
+        assert!(parsed.error.is_none());
+    }
+
     #[test]
     fn tool_result_serialization_roundtrip() {
         let result = ToolResult {

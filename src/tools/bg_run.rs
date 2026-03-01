@@ -657,6 +657,67 @@ mod tests {
         assert!(drained2.is_empty());
     }
 
+    /// REQ-TOOL-BG-002-SC01
+    #[test]
+    fn escape_xml_special_chars() {
+        assert_eq!(escape_xml("a & b"), "a &amp; b");
+        assert_eq!(escape_xml("<tag>"), "&lt;tag&gt;");
+        assert_eq!(escape_xml(r#"say "hello""#), "say &quot;hello&quot;");
+        assert_eq!(escape_xml("it's"), "it&apos;s");
+        assert_eq!(
+            escape_xml(r#"<script>alert("xss")</script>"#),
+            "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;"
+        );
+    }
+
+    /// REQ-TOOL-BG-001-SC02
+    #[tokio::test]
+    async fn job_store_drain_filters_by_sender() {
+        let store = BgJobStore::new();
+
+        // Insert completed job for user_a
+        store
+            .insert(BgJob {
+                id: "j-a1".to_string(),
+                tool_name: "test".to_string(),
+                sender: Some("user_a".to_string()),
+                status: BgJobStatus::Complete,
+                result: Some("result_a".to_string()),
+                error: None,
+                started_at: Instant::now(),
+                completed_at: Some(Instant::now()),
+                delivered: false,
+                delivered_at: None,
+            })
+            .await;
+
+        // Insert completed job for user_b
+        store
+            .insert(BgJob {
+                id: "j-b1".to_string(),
+                tool_name: "test".to_string(),
+                sender: Some("user_b".to_string()),
+                status: BgJobStatus::Complete,
+                result: Some("result_b".to_string()),
+                error: None,
+                started_at: Instant::now(),
+                completed_at: Some(Instant::now()),
+                delivered: false,
+                delivered_at: None,
+            })
+            .await;
+
+        // Drain only user_a's jobs
+        let drained = store.drain_completed(Some("user_a")).await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].id, "j-a1");
+
+        // user_b's job should still be available
+        let drained_b = store.drain_completed(Some("user_b")).await;
+        assert_eq!(drained_b.len(), 1);
+        assert_eq!(drained_b[0].id, "j-b1");
+    }
+
     #[test]
     fn format_bg_result() {
         let job = BgJob {

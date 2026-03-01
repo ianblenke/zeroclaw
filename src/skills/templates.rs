@@ -169,3 +169,87 @@ pub fn apply(content: &str, name: &str, bin_name: &str) -> String {
         .replace("__SKILL_NAME__", name)
         .replace("__BIN_NAME__", bin_name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REQ-SKILL-001-SC01
+    #[test]
+    fn find_by_exact_name() {
+        let t = find("weather_lookup").unwrap();
+        assert_eq!(t.name, "weather_lookup");
+        assert_eq!(t.language, "rust");
+    }
+
+    /// REQ-SKILL-001-SC02
+    #[test]
+    fn find_by_language_alias() {
+        let t = find("rust").unwrap();
+        assert_eq!(t.language, "rust");
+    }
+
+    /// REQ-SKILL-001-SC03
+    #[test]
+    fn find_typescript_aliases() {
+        assert!(find("typescript").is_some());
+        assert!(find("ts").is_some());
+        assert_eq!(find("typescript").unwrap().name, find("ts").unwrap().name);
+    }
+
+    /// REQ-SKILL-001-SC04
+    #[test]
+    fn find_python_aliases() {
+        assert!(find("python").is_some());
+        assert!(find("py").is_some());
+    }
+
+    /// REQ-SKILL-001-SC05
+    #[test]
+    fn find_unknown_returns_none() {
+        assert!(find("nonexistent").is_none());
+        assert!(find("java").is_none());
+    }
+
+    /// REQ-SKILL-001-SC06
+    #[test]
+    fn all_templates_have_files() {
+        for t in ALL {
+            assert!(!t.files.is_empty(), "Template {} has no files", t.name);
+            assert!(!t.name.is_empty());
+            assert!(!t.language.is_empty());
+            assert!(!t.description.is_empty());
+            assert!(!t.test_args.is_empty());
+        }
+    }
+
+    /// REQ-SKILL-001-SC07
+    #[test]
+    fn apply_substitutions() {
+        let content = "name=__SKILL_NAME__ bin=__BIN_NAME__";
+        let result = apply(content, "my_skill", "my-bin");
+        assert_eq!(result, "name=my_skill bin=my-bin");
+    }
+
+    /// REQ-SKILL-001-SC08
+    #[test]
+    fn apply_no_substitutions() {
+        let content = "no placeholders here";
+        let result = apply(content, "skill", "bin");
+        assert_eq!(result, "no placeholders here");
+    }
+
+    /// REQ-SKILL-001-SC09
+    #[test]
+    fn all_templates_count() {
+        assert_eq!(ALL.len(), 5);
+    }
+
+    /// REQ-SKILL-001-SC10
+    #[test]
+    fn find_go_template() {
+        let t = find("go").unwrap();
+        assert_eq!(t.language, "go");
+        assert_eq!(t.name, "word_count");
+    }
+}

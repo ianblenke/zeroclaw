@@ -97,3 +97,46 @@ impl Tool for HardwareCapabilitiesTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REQ-PERIPH-001-SC01
+    #[test]
+    fn tool_name_and_description() {
+        let tool = HardwareCapabilitiesTool::new(vec![]);
+        assert_eq!(tool.name(), "hardware_capabilities");
+        assert!(!tool.description().is_empty());
+    }
+
+    /// REQ-PERIPH-001-SC02
+    #[test]
+    fn parameters_schema_has_board_property() {
+        let tool = HardwareCapabilitiesTool::new(vec![]);
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["board"].is_object());
+    }
+
+    /// REQ-PERIPH-001-SC03
+    #[tokio::test]
+    async fn execute_no_boards_returns_no_boards_message() {
+        let tool = HardwareCapabilitiesTool::new(vec![]);
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("No serial boards"));
+    }
+
+    /// REQ-PERIPH-001-SC04
+    #[tokio::test]
+    async fn execute_with_filter_no_match_returns_message() {
+        let tool = HardwareCapabilitiesTool::new(vec![]);
+        let result = tool
+            .execute(serde_json::json!({"board": "nonexistent"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("No matching board"));
+    }
+}

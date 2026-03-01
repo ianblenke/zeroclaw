@@ -206,3 +206,133 @@ fn memory_map_static(board: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REQ-HW-001-SC01
+    #[test]
+    fn tool_name_and_description() {
+        let tool = HardwareBoardInfoTool::new(vec!["nucleo-f401re".into()]);
+        assert_eq!(tool.name(), "hardware_board_info");
+        assert!(!tool.description().is_empty());
+    }
+
+    /// REQ-HW-001-SC02
+    #[test]
+    fn parameters_schema_has_board_property() {
+        let tool = HardwareBoardInfoTool::new(vec![]);
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["board"].is_object());
+    }
+
+    /// REQ-HW-001-SC03
+    #[test]
+    fn static_info_for_known_board() {
+        let tool = HardwareBoardInfoTool::new(vec!["nucleo-f401re".into()]);
+        let info = tool.static_info_for_board("nucleo-f401re");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert!(info.contains("STM32F401RET6"));
+        assert!(info.contains("nucleo-f401re"));
+    }
+
+    /// REQ-HW-001-SC04
+    #[test]
+    fn static_info_for_unknown_board() {
+        let tool = HardwareBoardInfoTool::new(vec!["unknown-board".into()]);
+        let info = tool.static_info_for_board("unknown-board");
+        assert!(info.is_none());
+    }
+
+    /// REQ-HW-001-SC05
+    #[test]
+    fn static_info_covers_all_board_entries() {
+        let tool = HardwareBoardInfoTool::new(vec![]);
+        for &(board, chip, _) in BOARD_INFO {
+            let info = tool.static_info_for_board(board).unwrap();
+            assert!(info.contains(chip), "Board {board} should mention chip {chip}");
+        }
+    }
+
+    /// REQ-HW-001-SC06
+    #[test]
+    fn memory_map_static_nucleo() {
+        let map = memory_map_static("nucleo-f401re");
+        assert!(map.is_some());
+        assert!(map.unwrap().contains("Flash"));
+        // f411re returns same map
+        assert_eq!(memory_map_static("nucleo-f411re"), map);
+    }
+
+    /// REQ-HW-001-SC07
+    #[test]
+    fn memory_map_static_arduino() {
+        let map = memory_map_static("arduino-uno");
+        assert!(map.is_some());
+        assert!(map.unwrap().contains("SRAM"));
+    }
+
+    /// REQ-HW-001-SC08
+    #[test]
+    fn memory_map_static_esp32() {
+        let map = memory_map_static("esp32");
+        assert!(map.is_some());
+        assert!(map.unwrap().contains("IRAM"));
+    }
+
+    /// REQ-HW-001-SC09
+    #[test]
+    fn memory_map_static_unknown_returns_none() {
+        assert!(memory_map_static("rpi-gpio").is_none());
+        assert!(memory_map_static("nonexistent").is_none());
+    }
+
+    /// REQ-HW-001-SC10
+    #[tokio::test]
+    async fn execute_no_boards_returns_error() {
+        let tool = HardwareBoardInfoTool::new(vec![]);
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("No peripherals"));
+    }
+
+    /// REQ-HW-001-SC11
+    #[tokio::test]
+    async fn execute_known_board_returns_static_info() {
+        let tool = HardwareBoardInfoTool::new(vec!["esp32".into()]);
+        let result = tool.execute(serde_json::json!({"board": "esp32"})).await.unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("ESP32"));
+    }
+
+    /// REQ-HW-001-SC12
+    #[tokio::test]
+    async fn execute_unknown_board_falls_back() {
+        let tool = HardwareBoardInfoTool::new(vec!["custom-board".into()]);
+        let result = tool.execute(serde_json::json!({"board": "custom-board"})).await.unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("No static info available"));
+    }
+
+    /// REQ-HW-001-SC13
+    #[tokio::test]
+    async fn execute_defaults_to_first_board() {
+        let tool = HardwareBoardInfoTool::new(vec!["arduino-uno".into(), "esp32".into()]);
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("ATmega328P"));
+    }
+
+    /// REQ-HW-001-SC14
+    #[tokio::test]
+    async fn execute_nucleo_includes_memory_map() {
+        let tool = HardwareBoardInfoTool::new(vec!["nucleo-f401re".into()]);
+        let result = tool.execute(serde_json::json!({})).await.unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("Memory map"));
+        assert!(result.output.contains("Flash"));
+    }
+}
