@@ -40,5 +40,10 @@ credentials.json
 /config.toml
 .worktrees/
 
+# Haven deployment runtime data
+haven/data/
+haven/.env
+
 # Nix
 result
+

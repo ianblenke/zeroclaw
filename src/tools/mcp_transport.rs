@@ -171,7 +171,12 @@ impl McpTransportConn for HttpTransport {
     async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
         let body = serde_json::to_string(request)?;
 
-        let mut req = self.client.post(&self.url).body(body);
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(body);
         for (key, value) in &self.headers {
             req = req.header(key, value);
         }
