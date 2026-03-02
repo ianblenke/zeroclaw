@@ -505,6 +505,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session_id: Strin
                 history.push(ChatMessage::assistant(&safe_response));
                 persist_ws_history(&state, &session_id, &history).await;
 
+                // Stream response as sentence-level chunks for early TTS start
+                for sentence in split_into_sentences(&safe_response) {
+                    let chunk = serde_json::json!({
+                        "type": "chunk",
+                        "content": sentence,
+                    });
+                    let _ = socket.send(Message::Text(chunk.to_string().into())).await;
+                }
+
                 // Send the full response as a done message
                 let done = serde_json::json!({
                     "type": "done",
@@ -536,6 +545,67 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session_id: Strin
             }
         }
     }
+}
+
+/// Split text into sentences for streaming TTS.
+/// Splits on sentence-ending punctuation (`.!?`) followed by whitespace,
+/// preserving the punctuation with each sentence. Avoids splitting on
+/// decimals like `2.0`.  Merges very short fragments with neighbors.
+fn split_into_sentences(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut raw: Vec<String> = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+
+    while i < len {
+        let b = bytes[i];
+        if (b == b'.' || b == b'!' || b == b'?') && i + 1 < len && bytes[i + 1].is_ascii_whitespace()
+        {
+            // Skip decimal numbers (e.g., "2.0")
+            if b == b'.'
+                && i > 0
+                && bytes[i - 1].is_ascii_digit()
+                && i + 1 < len
+                && bytes[i + 1].is_ascii_digit()
+            {
+                i += 1;
+                continue;
+            }
+            let end = i + 1; // include the punctuation
+            let sentence = text[start..end].trim();
+            if !sentence.is_empty() {
+                raw.push(sentence.to_string());
+            }
+            // skip trailing whitespace
+            start = i + 1;
+            while start < len && bytes[start].is_ascii_whitespace() {
+                start += 1;
+            }
+            i = start;
+            continue;
+        }
+        i += 1;
+    }
+    if start < len {
+        let sentence = text[start..].trim();
+        if !sentence.is_empty() {
+            raw.push(sentence.to_string());
+        }
+    }
+
+    // Merge very short fragments (<20 chars) with the previous sentence
+    let mut merged: Vec<String> = Vec::new();
+    for s in raw {
+        if !merged.is_empty() && s.len() < 20 {
+            let last = merged.last_mut().unwrap();
+            last.push(' ');
+            last.push_str(&s);
+        } else {
+            merged.push(s);
+        }
+    }
+    merged
 }
 
 fn extract_ws_bearer_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<String> {
