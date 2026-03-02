@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Web search tool for searching the internet.
-/// Supports providers: DuckDuckGo (free), Brave, Firecrawl, Tavily, Perplexity, Exa, and Jina.
+/// Supports providers: DuckDuckGo (free), Brave, Firecrawl, Tavily, Perplexity, Exa, Jina, and SearXNG.
 pub struct WebSearchTool {
     security: Arc<SecurityPolicy>,
     provider: String,
@@ -207,6 +207,7 @@ impl WebSearchTool {
             "perplexity" => Some("perplexity"),
             "exa" => Some("exa"),
             "jina" => Some("jina"),
+            "searxng" | "searx" => Some("searxng"),
             _ => None,
         }
     }
@@ -222,7 +223,7 @@ impl WebSearchTool {
         ) {
             let normalized = Self::normalize_provider(raw).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Unknown search provider '{raw}'. Supported: duckduckgo, brave, firecrawl, tavily, perplexity, exa, jina"
+                    "Unknown search provider '{raw}'. Supported: duckduckgo, brave, firecrawl, tavily, perplexity, exa, jina, searxng"
                 )
             })?;
             if seen.insert(normalized) {
@@ -809,6 +810,80 @@ impl WebSearchTool {
         ))
     }
 
+    async fn search_searxng(&self, query: &str) -> anyhow::Result<String> {
+        let base_url = self
+            .api_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("http://localhost:8080");
+
+        let encoded_query = urlencoding::encode(query);
+        let search_url = format!(
+            "{}/search?q={}&format=json&pageno=1",
+            base_url.trim_end_matches('/'),
+            encoded_query
+        );
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(self.timeout_secs))
+            .user_agent(self.user_agent.as_str())
+            .build()?;
+
+        let response = client.get(&search_url).send().await.map_err(|e| {
+            anyhow::anyhow!(
+                "SearXNG search request failed: {e}. Verify [web_search].api_url points to a running SearXNG instance."
+            )
+        })?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "SearXNG search failed with status: {}",
+                response.status()
+            );
+        }
+
+        let json: serde_json::Value = response.json().await?;
+        self.parse_searxng_results(&json, query)
+    }
+
+    fn parse_searxng_results(
+        &self,
+        json: &serde_json::Value,
+        query: &str,
+    ) -> anyhow::Result<String> {
+        let results = json
+            .get("results")
+            .and_then(|r| r.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Invalid SearXNG response: missing results array"))?;
+
+        if results.is_empty() {
+            return Ok(format!("No results found for: {}", query));
+        }
+
+        let mut lines = vec![format!("Search results for: {} (via SearXNG)", query)];
+
+        for (i, result) in results.iter().take(self.max_results).enumerate() {
+            let title = result
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("No title");
+            let url = result.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            let content = result
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+
+            lines.push(format!("{}. {}", i + 1, title));
+            lines.push(format!("   {}", url));
+            if !content.trim().is_empty() {
+                lines.push(format!("   {}", content.trim()));
+            }
+        }
+
+        Ok(lines.join("\n"))
+    }
+
     async fn search_with_provider(&self, provider: &str, query: &str) -> anyhow::Result<String> {
         match provider {
             "duckduckgo" => self.search_duckduckgo(query).await,
@@ -818,6 +893,7 @@ impl WebSearchTool {
             "perplexity" => self.search_perplexity(query).await,
             "exa" => self.search_exa(query).await,
             "jina" => self.search_jina(query).await,
+            "searxng" => self.search_searxng(query).await,
             _ => anyhow::bail!("Unknown search provider: {provider}"),
         }
     }

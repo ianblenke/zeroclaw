@@ -1974,7 +1974,7 @@ pub struct WebSearchConfig {
     #[serde(default)]
     pub enabled: bool,
     /// Search provider: "duckduckgo"/"ddg" (free, no API key), "brave", "firecrawl",
-    /// "tavily", "perplexity", "exa", or "jina"
+    /// "tavily", "perplexity", "exa", "jina", or "searxng"/"searx"
     #[serde(default = "default_web_search_provider")]
     pub provider: String,
     /// Generic provider API key (used by firecrawl, tavily, and as fallback for brave).
@@ -2084,6 +2084,8 @@ const WEB_SEARCH_PROVIDER_ALLOWED_VALUES: &[&str] = &[
     "perplexity",
     "exa",
     "jina",
+    "searxng",
+    "searx",
 ];
 const WEB_SEARCH_EXA_SEARCH_TYPE_ALLOWED_VALUES: &[&str] = &["auto", "keyword", "neural"];
 
@@ -2127,6 +2129,7 @@ fn normalize_web_search_provider(raw: &str) -> Option<&'static str> {
         "perplexity" => Some("perplexity"),
         "exa" => Some("exa"),
         "jina" => Some("jina"),
+        "searxng" | "searx" => Some("searxng"),
         _ => None,
     }
 }

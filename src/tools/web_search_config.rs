@@ -133,6 +133,7 @@ impl WebSearchConfigTool {
             "perplexity",
             "exa",
             "jina",
+            "searxng",
         ]
     }
 
@@ -145,6 +146,7 @@ impl WebSearchConfigTool {
             "perplexity" => Some("perplexity"),
             "exa" => Some("exa"),
             "jina" => Some("jina"),
+            "searxng" | "searx" => Some("searxng"),
             _ => None,
         }
     }
