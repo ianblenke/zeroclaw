@@ -21,6 +21,7 @@ use axum::{
     http::{header, HeaderMap},
     response::IntoResponse,
 };
+use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -401,7 +402,7 @@ pub async fn handle_ws_chat(
         .into_response()
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState, session_id: String) {
+async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     let ws_session_id = format!("ws_{}", Uuid::new_v4());
 
     // Build system prompt once for the session
@@ -423,189 +424,219 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session_id: Strin
         "session_id": session_id.as_str(),
         "messages": persisted_turns,
     });
-    let _ = socket
+
+    // Split socket into reader/writer halves for bidirectional communication:
+    // - Writer sends responses + receives broadcast events (proactive push)
+    // - Reader receives client messages
+    let (mut ws_writer, mut ws_reader) = socket.split();
+    let mut broadcast_rx = state.event_tx.subscribe();
+
+    let _ = ws_writer
         .send(Message::Text(history_payload.to_string().into()))
         .await;
 
-    while let Some(msg) = socket.recv().await {
-        let msg = match msg {
-            Ok(Message::Text(text)) => text,
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => continue,
-        };
+    loop {
+        tokio::select! {
+            // ── Client sent a message ──
+            client_msg = ws_reader.next() => {
+                let text = match client_msg {
+                    Some(Ok(Message::Text(text))) => text,
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => continue,
+                };
 
-        // Parse incoming message
-        let parsed: serde_json::Value = match serde_json::from_str(&msg) {
-            Ok(v) => v,
-            Err(_) => {
-                let err = serde_json::json!({"type": "error", "message": "Invalid JSON"});
-                let _ = socket.send(Message::Text(err.to_string().into())).await;
-                continue;
-            }
-        };
+                // Parse incoming message
+                let parsed: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let err = serde_json::json!({"type": "error", "message": "Invalid JSON"});
+                        let _ = ws_writer.send(Message::Text(err.to_string().into())).await;
+                        continue;
+                    }
+                };
 
-        let msg_type = parsed["type"].as_str().unwrap_or("");
-        if msg_type != "message" {
-            continue;
-        }
-
-        let content = parsed["content"].as_str().unwrap_or("").to_string();
-        if content.is_empty() {
-            continue;
-        }
-        let perplexity_cfg = { state.config.lock().security.perplexity_filter.clone() };
-        if let Some(assessment) =
-            crate::security::detect_adversarial_suffix(&content, &perplexity_cfg)
-        {
-            let err = serde_json::json!({
-                "type": "error",
-                "message": format!(
-                    "Input blocked by security.perplexity_filter: perplexity={:.2} (threshold {:.2}), symbol_ratio={:.2} (threshold {:.2}), suspicious_tokens={}.",
-                    assessment.perplexity,
-                    perplexity_cfg.perplexity_threshold,
-                    assessment.symbol_ratio,
-                    perplexity_cfg.symbol_ratio_threshold,
-                    assessment.suspicious_token_count
-                ),
-            });
-            let _ = socket.send(Message::Text(err.to_string().into())).await;
-            continue;
-        }
-
-        // Add user message to history
-        history.push(ChatMessage::user(&content));
-        persist_ws_history(&state, &session_id, &history).await;
-
-        // Get provider info
-        let provider_label = state
-            .config
-            .lock()
-            .default_provider
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-
-        // Broadcast agent_start event
-        let _ = state.event_tx.send(serde_json::json!({
-            "type": "agent_start",
-            "provider": provider_label,
-            "model": state.model,
-        }));
-
-        // Full agentic loop with tools (includes WASM skills, shell, memory, etc.)
-        match super::run_gateway_chat_with_tools(&state, &content, Some(&ws_session_id)).await {
-            Ok(response) => {
-                let leak_guard_cfg = { state.config.lock().security.outbound_leak_guard.clone() };
-                let safe_response = finalize_ws_response(
-                    &response,
-                    &history,
-                    state.tools_registry_exec.as_ref(),
-                    &leak_guard_cfg,
-                );
-                // Add assistant response to history
-                history.push(ChatMessage::assistant(&safe_response));
-                persist_ws_history(&state, &session_id, &history).await;
-
-                // Stream response as sentence-level chunks for early TTS start
-                for sentence in split_into_sentences(&safe_response) {
-                    let chunk = serde_json::json!({
-                        "type": "chunk",
-                        "content": sentence,
-                    });
-                    let _ = socket.send(Message::Text(chunk.to_string().into())).await;
+                let msg_type = parsed["type"].as_str().unwrap_or("");
+                if msg_type != "message" {
+                    continue;
                 }
 
-                // Send the full response as a done message
-                let done = serde_json::json!({
-                    "type": "done",
-                    "full_response": safe_response,
-                });
-                let _ = socket.send(Message::Text(done.to_string().into())).await;
+                let content = parsed["content"].as_str().unwrap_or("").to_string();
+                if content.is_empty() {
+                    continue;
+                }
+                let perplexity_cfg = { state.config.lock().security.perplexity_filter.clone() };
+                if let Some(assessment) =
+                    crate::security::detect_adversarial_suffix(&content, &perplexity_cfg)
+                {
+                    let err = serde_json::json!({
+                        "type": "error",
+                        "message": format!(
+                            "Input blocked by security.perplexity_filter: perplexity={:.2} (threshold {:.2}), symbol_ratio={:.2} (threshold {:.2}), suspicious_tokens={}.",
+                            assessment.perplexity,
+                            perplexity_cfg.perplexity_threshold,
+                            assessment.symbol_ratio,
+                            perplexity_cfg.symbol_ratio_threshold,
+                            assessment.suspicious_token_count
+                        ),
+                    });
+                    let _ = ws_writer.send(Message::Text(err.to_string().into())).await;
+                    continue;
+                }
 
-                // Broadcast agent_end event
+                // Add user message to history
+                history.push(ChatMessage::user(&content));
+                persist_ws_history(&state, &session_id, &history).await;
+
+                // Get provider info
+                let provider_label = state
+                    .config
+                    .lock()
+                    .default_provider
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                // Broadcast agent_start event
                 let _ = state.event_tx.send(serde_json::json!({
-                    "type": "agent_end",
+                    "type": "agent_start",
                     "provider": provider_label,
                     "model": state.model,
                 }));
-            }
-            Err(e) => {
-                let sanitized = crate::providers::sanitize_api_error(&e.to_string());
-                let err = serde_json::json!({
-                    "type": "error",
-                    "message": sanitized,
+
+                // Full agentic loop with tools — streams text chunks to client
+                // as the final response is generated for early TTS start.
+                let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<String>(64);
+                let state_for_task = state.clone();
+                let content_for_task = content.clone();
+                let ws_session_for_task = ws_session_id.clone();
+
+                let agent_handle = tokio::spawn(async move {
+                    super::run_gateway_streaming_chat_with_tools(
+                        &state_for_task,
+                        &content_for_task,
+                        Some(&ws_session_for_task),
+                        delta_tx,
+                    )
+                    .await
                 });
-                let _ = socket.send(Message::Text(err.to_string().into())).await;
 
-                // Broadcast error event
-                let _ = state.event_tx.send(serde_json::json!({
-                    "type": "error",
-                    "component": "ws_chat",
-                    "message": sanitized,
-                }));
+                // Stream word-level deltas directly to the client as they arrive.
+                // Also listen for broadcast events so proactive messages arrive
+                // even during agent response streaming.
+                let mut chunks_sent = false;
+                let mut in_final_response = false;
+
+                loop {
+                    tokio::select! {
+                        delta = delta_rx.recv() => {
+                            match delta {
+                                Some(d) => {
+                                    if d == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
+                                        in_final_response = true;
+                                    } else if d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_SENTINEL)
+                                        || d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_BLOCK_SENTINEL)
+                                    {
+                                        // Progress updates (thinking, tool calls) — skip.
+                                    } else if in_final_response {
+                                        let chunk_msg = serde_json::json!({
+                                            "type": "chunk",
+                                            "content": d,
+                                        });
+                                        let _ = ws_writer
+                                            .send(Message::Text(chunk_msg.to_string().into()))
+                                            .await;
+                                        chunks_sent = true;
+                                    }
+                                }
+                                None => break, // Channel closed — agent task done
+                            }
+                        }
+                        broadcast = broadcast_rx.recv() => {
+                            if let Ok(event) = broadcast {
+                                if event.get("type").and_then(|t| t.as_str()) == Some("proactive") {
+                                    let _ = ws_writer.send(Message::Text(event.to_string().into())).await;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Channel closed — await the agent task result.
+                match agent_handle.await {
+                    Ok(Ok(response)) => {
+                        let leak_guard_cfg =
+                            { state.config.lock().security.outbound_leak_guard.clone() };
+                        let safe_response = finalize_ws_response(
+                            &response,
+                            &history,
+                            state.tools_registry_exec.as_ref(),
+                            &leak_guard_cfg,
+                        );
+
+                        // If nothing was streamed, send the full response as a chunk.
+                        if !chunks_sent {
+                            let chunk_msg = serde_json::json!({
+                                "type": "chunk",
+                                "content": safe_response,
+                            });
+                            let _ = ws_writer
+                                .send(Message::Text(chunk_msg.to_string().into()))
+                                .await;
+                        }
+
+                        history.push(ChatMessage::assistant(&safe_response));
+                        persist_ws_history(&state, &session_id, &history).await;
+
+                        let done = serde_json::json!({
+                            "type": "done",
+                            "full_response": safe_response,
+                        });
+                        let _ = ws_writer
+                            .send(Message::Text(done.to_string().into()))
+                            .await;
+
+                        let _ = state.event_tx.send(serde_json::json!({
+                            "type": "agent_end",
+                            "provider": provider_label,
+                            "model": state.model,
+                        }));
+                    }
+                    Ok(Err(e)) => {
+                        let sanitized = crate::providers::sanitize_api_error(&e.to_string());
+                        let err = serde_json::json!({
+                            "type": "error",
+                            "message": sanitized,
+                        });
+                        let _ = ws_writer
+                            .send(Message::Text(err.to_string().into()))
+                            .await;
+
+                        let _ = state.event_tx.send(serde_json::json!({
+                            "type": "error",
+                            "component": "ws_chat",
+                            "message": sanitized,
+                        }));
+                    }
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "type": "error",
+                            "message": format!("Agent task panicked: {e}"),
+                        });
+                        let _ = ws_writer
+                            .send(Message::Text(err.to_string().into()))
+                            .await;
+                    }
+                }
+            }
+            // ── Broadcast event (proactive push) while idle ──
+            broadcast = broadcast_rx.recv() => {
+                if let Ok(event) = broadcast {
+                    if event.get("type").and_then(|t| t.as_str()) == Some("proactive") {
+                        let _ = ws_writer.send(Message::Text(event.to_string().into())).await;
+                    }
+                }
             }
         }
     }
-}
-
-/// Split text into sentences for streaming TTS.
-/// Splits on sentence-ending punctuation (`.!?`) followed by whitespace,
-/// preserving the punctuation with each sentence. Avoids splitting on
-/// decimals like `2.0`.  Merges very short fragments with neighbors.
-fn split_into_sentences(text: &str) -> Vec<String> {
-    let bytes = text.as_bytes();
-    let len = bytes.len();
-    let mut raw: Vec<String> = Vec::new();
-    let mut start = 0;
-    let mut i = 0;
-
-    while i < len {
-        let b = bytes[i];
-        if (b == b'.' || b == b'!' || b == b'?') && i + 1 < len && bytes[i + 1].is_ascii_whitespace()
-        {
-            // Skip decimal numbers (e.g., "2.0")
-            if b == b'.'
-                && i > 0
-                && bytes[i - 1].is_ascii_digit()
-                && i + 1 < len
-                && bytes[i + 1].is_ascii_digit()
-            {
-                i += 1;
-                continue;
-            }
-            let end = i + 1; // include the punctuation
-            let sentence = text[start..end].trim();
-            if !sentence.is_empty() {
-                raw.push(sentence.to_string());
-            }
-            // skip trailing whitespace
-            start = i + 1;
-            while start < len && bytes[start].is_ascii_whitespace() {
-                start += 1;
-            }
-            i = start;
-            continue;
-        }
-        i += 1;
-    }
-    if start < len {
-        let sentence = text[start..].trim();
-        if !sentence.is_empty() {
-            raw.push(sentence.to_string());
-        }
-    }
-
-    // Merge very short fragments (<20 chars) with the previous sentence
-    let mut merged: Vec<String> = Vec::new();
-    for s in raw {
-        if !merged.is_empty() && s.len() < 20 {
-            let last = merged.last_mut().unwrap();
-            last.push(' ');
-            last.push_str(&s);
-        } else {
-            merged.push(s);
-        }
-    }
-    merged
 }
 
 fn extract_ws_bearer_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<String> {

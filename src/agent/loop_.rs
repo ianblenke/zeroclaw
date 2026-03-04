@@ -834,6 +834,7 @@ pub(crate) async fn agent_turn(
     silent: bool,
     multimodal_config: &crate::config::MultimodalConfig,
     max_tool_iterations: usize,
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     run_tool_call_loop(
         provider,
@@ -849,7 +850,7 @@ pub(crate) async fn agent_turn(
         multimodal_config,
         max_tool_iterations,
         None,
-        None,
+        on_delta,
         None,
         &[],
     )
@@ -2835,13 +2836,14 @@ pub async fn run(
 /// Process a single message through the full agent (with tools, peripherals, memory).
 /// Used by channels (Telegram, Discord, etc.) to enable hardware and tool use.
 pub async fn process_message(config: Config, message: &str) -> Result<String> {
-    process_message_with_session(config, message, None).await
+    process_message_with_session(config, message, None, None).await
 }
 
 pub async fn process_message_with_session(
     config: Config,
     message: &str,
     session_id: Option<&str>,
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     if let Err(error) = crate::plugins::runtime::initialize_from_config(&config.plugins) {
         tracing::warn!("plugin registry initialization skipped: {error}");
@@ -3093,6 +3095,7 @@ pub async fn process_message_with_session(
                 true,
                 &config.multimodal,
                 config.agent.max_tool_iterations,
+                on_delta,
             ),
         ),
     )

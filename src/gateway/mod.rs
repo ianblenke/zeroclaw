@@ -839,6 +839,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/cli-tools", get(api::handle_api_cli_tools))
         .route("/api/health", get(api::handle_api_health))
         .route("/api/node-control", post(handle_node_control))
+        // ── Internal push (proactive messaging) ──
+        .route("/api/internal/push", post(handle_internal_push))
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         // ── WebSocket agent chat ──
@@ -1067,7 +1069,20 @@ pub(super) async fn run_gateway_chat_with_tools(
     session_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let config = state.config.lock().clone();
-    crate::agent::process_message_with_session(config, message, session_id).await
+    crate::agent::process_message_with_session(config, message, session_id, None).await
+}
+
+/// Streaming variant: runs the full agent loop but streams word-level deltas
+/// through the provided `on_delta` channel as the final response is generated.
+/// Used by the WS handler for real-time sentence-level TTS streaming.
+pub(super) async fn run_gateway_streaming_chat_with_tools(
+    state: &AppState,
+    message: &str,
+    session_id: Option<&str>,
+    on_delta: tokio::sync::mpsc::Sender<String>,
+) -> anyhow::Result<String> {
+    let config = state.config.lock().clone();
+    crate::agent::process_message_with_session(config, message, session_id, Some(on_delta)).await
 }
 
 fn gateway_outbound_leak_guard_snapshot(
@@ -1309,6 +1324,61 @@ async fn handle_node_control(
             })),
         ),
     }
+}
+
+/// POST /api/internal/push — publish a proactive message to all connected WS clients.
+///
+/// Restricted to loopback callers (cron scheduler, internal services).
+/// Publishes a `{"type":"proactive", ...}` event via the SSE broadcast channel,
+/// which the WS handler forwards to connected Haven clients.
+async fn handle_internal_push(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> impl IntoResponse {
+    if !is_loopback_request(Some(peer_addr), &headers, state.trust_forwarded_headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Internal endpoint — loopback only"})),
+        );
+    }
+
+    let Json(payload) = match body {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid JSON: {e}")})),
+            );
+        }
+    };
+
+    let content = payload
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    if content.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "\"content\" field is required and must be non-empty"})),
+        );
+    }
+
+    let push_event = serde_json::json!({
+        "type": "proactive",
+        "content": content,
+        "source": payload.get("source").and_then(|s| s.as_str()).unwrap_or("cron"),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        // Pass through targeting fields for unicast delivery (client-side filtering)
+        "target_session": payload.get("target_session").and_then(|s| s.as_str()),
+    });
+
+    let receivers = state.event_tx.send(push_event).unwrap_or(0);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "receivers": receivers})),
+    )
 }
 
 /// POST /webhook — main webhook endpoint

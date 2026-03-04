@@ -515,6 +515,50 @@ pub(crate) async fn deliver_announcement(
                 anyhow::bail!("matrix delivery channel requires `channel-matrix` feature");
             }
         }
+        "gateway" | "websocket" | "haven" => {
+            // Deliver to connected WS/Haven clients via the internal push endpoint.
+            // If `target` is a speaker ID, resolve to their last-active session for
+            // unicast delivery; otherwise broadcast to all clients.
+            let gateway_port = config.gateway.port;
+            let push_url = format!("http://127.0.0.1:{gateway_port}/api/internal/push");
+            let client = reqwest::Client::new();
+            let mut body = serde_json::json!({
+                "content": output,
+                "source": "cron",
+            });
+
+            // Resolve speaker → last-active session for unicast push
+            if !target.is_empty() && target != "*" {
+                let sessions_url =
+                    format!("http://speaker-id:8000/speakers/{target}/sessions");
+                if let Ok(resp) = client.get(&sessions_url).send().await {
+                    if let Ok(sessions) = resp.json::<Vec<serde_json::Value>>().await {
+                        if let Some(latest) = sessions.first() {
+                            if let Some(sid) =
+                                latest.get("session_id").and_then(|s| s.as_str())
+                            {
+                                body["target_session"] =
+                                    serde_json::Value::String(sid.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let resp = client
+                .post(&push_url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("gateway push failed: {e}"))?;
+            if !resp.status().is_success() {
+                anyhow::bail!(
+                    "gateway push returned HTTP {}: {}",
+                    resp.status(),
+                    resp.text().await.unwrap_or_default()
+                );
+            }
+        }
         other => anyhow::bail!("unsupported delivery channel: {other}"),
     }
 
