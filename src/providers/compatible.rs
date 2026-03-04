@@ -456,11 +456,18 @@ enum MessageContent {
 enum MessagePart {
     Text { text: String },
     ImageUrl { image_url: ImageUrlPart },
+    InputAudio { input_audio: InputAudioPart },
 }
 
 #[derive(Debug, Serialize)]
 struct ImageUrlPart {
     url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InputAudioPart {
+    data: String,
+    format: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1658,10 +1665,11 @@ impl OpenAiCompatibleProvider {
         }
 
         for (data, format) in audio_refs {
-            // llama.cpp expects all multimodal data as image_url parts with data: URLs
-            parts.push(MessagePart::ImageUrl {
-                image_url: ImageUrlPart {
-                    url: format!("data:audio/{format};base64,{data}"),
+            // llama.cpp expects input_audio parts per OpenAI-compatible API
+            parts.push(MessagePart::InputAudio {
+                input_audio: InputAudioPart {
+                    data: data.to_string(),
+                    format: format.to_string(),
                 },
             });
         }
