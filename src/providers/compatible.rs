@@ -456,11 +456,18 @@ enum MessageContent {
 enum MessagePart {
     Text { text: String },
     ImageUrl { image_url: ImageUrlPart },
+    InputAudio { input_audio: InputAudioPart },
 }
 
 #[derive(Debug, Serialize)]
 struct ImageUrlPart {
     url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InputAudioPart {
+    data: String,
+    format: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -481,6 +488,50 @@ struct UsageInfo {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ResponseMessage,
+}
+
+const AUDIO_MARKER_PREFIX: &str = "[AUDIO:";
+
+/// Parse `[AUDIO:data:audio/<format>;base64,<data>]` markers from content.
+/// Returns the cleaned text and a list of (base64_data, format) tuples.
+fn parse_audio_markers(content: &str) -> (String, Vec<(String, String)>) {
+    let mut refs = Vec::new();
+    let mut cleaned = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel_start) = content[cursor..].find(AUDIO_MARKER_PREFIX) {
+        let start = cursor + rel_start;
+        cleaned.push_str(&content[cursor..start]);
+
+        let marker_start = start + AUDIO_MARKER_PREFIX.len();
+        let Some(rel_end) = content[marker_start..].find(']') else {
+            cleaned.push_str(&content[start..]);
+            cursor = content.len();
+            break;
+        };
+
+        let end = marker_start + rel_end;
+        let candidate = content[marker_start..end].trim();
+
+        // Expected format: data:audio/<format>;base64,<base64data>
+        if let Some(rest) = candidate.strip_prefix("data:audio/") {
+            if let Some(semi_pos) = rest.find(";base64,") {
+                let format = rest[..semi_pos].to_string();
+                let data = rest[semi_pos + ";base64,".len()..].to_string();
+                if !data.is_empty() {
+                    refs.push((data, format));
+                }
+            }
+        }
+
+        cursor = end + 1;
+    }
+
+    if cursor < content.len() {
+        cleaned.push_str(&content[cursor..]);
+    }
+
+    (cleaned.trim().to_string(), refs)
 }
 
 /// Remove `<think>...</think>` blocks from model output.
@@ -1594,11 +1645,12 @@ impl OpenAiCompatibleProvider {
         }
 
         let (cleaned_text, image_refs) = multimodal::parse_image_markers(content);
-        if image_refs.is_empty() {
+        let (cleaned_text, audio_refs) = parse_audio_markers(&cleaned_text);
+        if image_refs.is_empty() && audio_refs.is_empty() {
             return MessageContent::Text(content.to_string());
         }
 
-        let mut parts = Vec::with_capacity(image_refs.len() + 1);
+        let mut parts = Vec::with_capacity(image_refs.len() + audio_refs.len() + 1);
         let trimmed_text = cleaned_text.trim();
         if !trimmed_text.is_empty() {
             parts.push(MessagePart::Text {
@@ -1609,6 +1661,12 @@ impl OpenAiCompatibleProvider {
         for image_ref in image_refs {
             parts.push(MessagePart::ImageUrl {
                 image_url: ImageUrlPart { url: image_ref },
+            });
+        }
+
+        for (data, format) in audio_refs {
+            parts.push(MessagePart::InputAudio {
+                input_audio: InputAudioPart { data, format },
             });
         }
 

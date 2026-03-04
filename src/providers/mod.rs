@@ -1415,6 +1415,23 @@ fn create_provider_with_url_and_options(
                 AuthStyle::Bearer,
             )))
         }
+        "ultravox" => {
+            let base_url = api_url
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("http://localhost:8000/v1");
+            let mut provider = OpenAiCompatibleProvider::new(
+                "Ultravox",
+                base_url,
+                key,
+                AuthStyle::Bearer,
+            );
+            // Disable native tool calling — vLLM bug #14209 crashes when
+            // audio input + --enable-auto-tool-choice are used simultaneously.
+            // ZeroClaw falls back to text-based tool call parsing.
+            provider.native_tool_calling = false;
+            Ok(Box::new(provider))
+        }
         "osaurus" => {
             let base_url = api_url
                 .map(str::trim)
@@ -2032,6 +2049,12 @@ pub fn list_providers() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "vllm",
             display_name: "vLLM",
+            aliases: &[],
+            local: true,
+        },
+        ProviderInfo {
+            name: "ultravox",
+            display_name: "Ultravox (vLLM)",
             aliases: &[],
             local: true,
         },

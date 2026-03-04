@@ -456,31 +456,49 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 };
 
                 let msg_type = parsed["type"].as_str().unwrap_or("");
-                if msg_type != "message" {
-                    continue;
-                }
-
-                let content = parsed["content"].as_str().unwrap_or("").to_string();
-                if content.is_empty() {
-                    continue;
-                }
-                let perplexity_cfg = { state.config.lock().security.perplexity_filter.clone() };
-                if let Some(assessment) =
-                    crate::security::detect_adversarial_suffix(&content, &perplexity_cfg)
-                {
-                    let err = serde_json::json!({
-                        "type": "error",
-                        "message": format!(
-                            "Input blocked by security.perplexity_filter: perplexity={:.2} (threshold {:.2}), symbol_ratio={:.2} (threshold {:.2}), suspicious_tokens={}.",
-                            assessment.perplexity,
-                            perplexity_cfg.perplexity_threshold,
-                            assessment.symbol_ratio,
-                            perplexity_cfg.symbol_ratio_threshold,
-                            assessment.suspicious_token_count
-                        ),
-                    });
-                    let _ = ws_writer.send(Message::Text(err.to_string().into())).await;
-                    continue;
+                let is_audio = msg_type == "audio";
+                let content = match msg_type {
+                    "message" => {
+                        let c = parsed["content"].as_str().unwrap_or("").to_string();
+                        if c.is_empty() { continue; }
+                        c
+                    }
+                    "audio" => {
+                        // Audio-native: embed as marker for Ultravox/multimodal provider
+                        let data = parsed["data"].as_str().unwrap_or("");
+                        let fmt = parsed["format"].as_str().unwrap_or("wav");
+                        if data.is_empty() { continue; }
+                        // Prepend speaker context if provided
+                        let speaker = parsed["speaker"].as_str().unwrap_or("");
+                        let audio_marker = format!("[AUDIO:data:audio/{fmt};base64,{data}]");
+                        if speaker.is_empty() {
+                            audio_marker
+                        } else {
+                            format!("[Speaker: {speaker}] {audio_marker}")
+                        }
+                    }
+                    _ => continue,
+                };
+                // Skip perplexity filter for audio (base64 is not adversarial text)
+                if !is_audio {
+                    let perplexity_cfg = { state.config.lock().security.perplexity_filter.clone() };
+                    if let Some(assessment) =
+                        crate::security::detect_adversarial_suffix(&content, &perplexity_cfg)
+                    {
+                        let err = serde_json::json!({
+                            "type": "error",
+                            "message": format!(
+                                "Input blocked by security.perplexity_filter: perplexity={:.2} (threshold {:.2}), symbol_ratio={:.2} (threshold {:.2}), suspicious_tokens={}.",
+                                assessment.perplexity,
+                                perplexity_cfg.perplexity_threshold,
+                                assessment.symbol_ratio,
+                                perplexity_cfg.symbol_ratio_threshold,
+                                assessment.suspicious_token_count
+                            ),
+                        });
+                        let _ = ws_writer.send(Message::Text(err.to_string().into())).await;
+                        continue;
+                    }
                 }
 
                 // Add user message to history
