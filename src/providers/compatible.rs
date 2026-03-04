@@ -48,7 +48,7 @@ pub struct OpenAiCompatibleProvider {
     merge_system_into_user: bool,
     /// Whether this provider supports OpenAI-style native tool calling.
     /// When false, tools are injected into the system prompt as text.
-    native_tool_calling: bool,
+    pub(crate) native_tool_calling: bool,
     /// Selects the primary protocol for this compatible endpoint.
     api_mode: CompatibleApiMode,
     /// Optional max token cap propagated to outbound requests.
