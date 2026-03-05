@@ -4396,11 +4396,20 @@ pub fn build_system_prompt_with_mode(
 
     // ── 0. Current local time (so the model never needs to guess) ──
     {
-        let now = chrono::Local::now();
+        let utc_now = chrono::Utc::now();
+        let time_str = if let Ok(tz_name) = std::env::var("TZ") {
+            if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
+                let local = utc_now.with_timezone(&tz);
+                local.format("%I:%M %p %Z on %A, %B %-d, %Y").to_string()
+            } else {
+                utc_now.format("%I:%M %p UTC on %A, %B %-d, %Y").to_string()
+            }
+        } else {
+            chrono::Local::now().format("%I:%M %p %Z on %A, %B %-d, %Y").to_string()
+        };
         let _ = writeln!(
             prompt,
-            "## Current Time\n\nThe current local time is: {}.\n",
-            now.format("%I:%M %p %Z on %A, %B %-d, %Y")
+            "## Current Time\n\nThe current local time is: {time_str}.\n",
         );
     }
 
