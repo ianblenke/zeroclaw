@@ -4394,6 +4394,16 @@ pub fn build_system_prompt_with_mode(
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
 
+    // ── 0. Current local time (so the model never needs to guess) ──
+    {
+        let now = chrono::Local::now();
+        let _ = writeln!(
+            prompt,
+            "## Current Time\n\nThe current local time is: {}.\n",
+            now.format("%I:%M %p %Z on %A, %B %-d, %Y")
+        );
+    }
+
     // ── 1. Tooling ──────────────────────────────────────────────
     if !tools.is_empty() {
         prompt.push_str("## Tools\n\n");
