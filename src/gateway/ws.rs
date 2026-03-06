@@ -668,7 +668,166 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
             // ── Broadcast event (proactive push) while idle ──
             broadcast = broadcast_rx.recv() => {
                 if let Ok(event) = broadcast {
-                    if event.get("type").and_then(|t| t.as_str()) == Some("proactive") {
+                    if event.get("type").and_then(|t| t.as_str()) != Some("proactive") {
+                        continue;
+                    }
+
+                    // Server-side target_session filtering (match internal UUID or user session ID)
+                    let target = event.get("target_session").and_then(|t| t.as_str());
+                    let is_for_me = target.is_none()
+                        || target == Some(ws_session_id.as_str())
+                        || target == Some(session_id.as_str());
+                    if !is_for_me {
+                        continue;
+                    }
+
+                    let process = event.get("process").and_then(|p| p.as_bool()).unwrap_or(false);
+                    let content = event.get("content").and_then(|c| c.as_str()).unwrap_or("");
+
+                    if process && !content.is_empty() {
+                        // Send notification chime to client
+                        let chime = serde_json::json!({"type": "notification_chime"});
+                        let _ = ws_writer.send(Message::Text(chime.to_string().into())).await;
+
+                        // Run agent loop with NO session history (proactive events need
+                        // minimal context to avoid filling the LLM context window).
+                        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<String>(64);
+                        let state_for_task = state.clone();
+                        let content_owned = content.to_string();
+
+                        let agent_handle = tokio::spawn(async move {
+                            super::run_gateway_streaming_chat_with_tools(
+                                &state_for_task,
+                                &content_owned,
+                                None, // No session → fresh context, avoids history bloat
+                                delta_tx,
+                            )
+                            .await
+                        });
+
+                        let provider_label = state
+                            .config
+                            .lock()
+                            .default_provider
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        let _ = state.event_tx.send(serde_json::json!({
+                            "type": "agent_start",
+                            "provider": provider_label,
+                            "model": state.model,
+                            "source": "proactive",
+                        }));
+
+                        // Stream word-level deltas to client
+                        let mut chunks_sent = false;
+                        let mut in_final_response = false;
+
+                        loop {
+                            tokio::select! {
+                                delta = delta_rx.recv() => {
+                                    match delta {
+                                        Some(d) => {
+                                            if d == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
+                                                in_final_response = true;
+                                            } else if d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_SENTINEL)
+                                                || d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_BLOCK_SENTINEL)
+                                            {
+                                                // Progress updates — skip.
+                                            } else if in_final_response {
+                                                let chunk_msg = serde_json::json!({
+                                                    "type": "chunk",
+                                                    "content": d,
+                                                });
+                                                let _ = ws_writer
+                                                    .send(Message::Text(chunk_msg.to_string().into()))
+                                                    .await;
+                                                chunks_sent = true;
+                                            }
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                inner_broadcast = broadcast_rx.recv() => {
+                                    if let Ok(ev) = inner_broadcast {
+                                        if ev.get("type").and_then(|t| t.as_str()) == Some("proactive") {
+                                            let tgt = ev.get("target_session").and_then(|t| t.as_str());
+                                            let for_me = tgt.is_none()
+                                                || tgt == Some(ws_session_id.as_str())
+                                                || tgt == Some(session_id.as_str());
+                                            let is_process = ev.get("process").and_then(|p| p.as_bool()).unwrap_or(false);
+                                            // During processing, forward non-process proactive events directly
+                                            if for_me && !is_process {
+                                                let _ = ws_writer.send(Message::Text(ev.to_string().into())).await;
+                                            }
+                                            // process:true events during streaming are dropped (avoid recursion)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Await agent result
+                        match agent_handle.await {
+                            Ok(Ok(response)) => {
+                                let leak_guard_cfg =
+                                    { state.config.lock().security.outbound_leak_guard.clone() };
+                                let safe_response = finalize_ws_response(
+                                    &response,
+                                    &history,
+                                    state.tools_registry_exec.as_ref(),
+                                    &leak_guard_cfg,
+                                );
+
+                                if !chunks_sent {
+                                    let chunk_msg = serde_json::json!({
+                                        "type": "chunk",
+                                        "content": safe_response,
+                                    });
+                                    let _ = ws_writer
+                                        .send(Message::Text(chunk_msg.to_string().into()))
+                                        .await;
+                                }
+
+                                history.push(ChatMessage::assistant(&safe_response));
+                                persist_ws_history(&state, &session_id, &history).await;
+
+                                let done = serde_json::json!({
+                                    "type": "done",
+                                    "full_response": safe_response,
+                                });
+                                let _ = ws_writer
+                                    .send(Message::Text(done.to_string().into()))
+                                    .await;
+
+                                let _ = state.event_tx.send(serde_json::json!({
+                                    "type": "agent_end",
+                                    "provider": provider_label,
+                                    "model": state.model,
+                                }));
+                            }
+                            Ok(Err(e)) => {
+                                let sanitized = crate::providers::sanitize_api_error(&e.to_string());
+                                let err = serde_json::json!({
+                                    "type": "error",
+                                    "message": sanitized,
+                                });
+                                let _ = ws_writer
+                                    .send(Message::Text(err.to_string().into()))
+                                    .await;
+                            }
+                            Err(e) => {
+                                let err = serde_json::json!({
+                                    "type": "error",
+                                    "message": format!("Proactive agent task panicked: {e}"),
+                                });
+                                let _ = ws_writer
+                                    .send(Message::Text(err.to_string().into()))
+                                    .await;
+                            }
+                        }
+                    } else if !content.is_empty() {
+                        // Regular proactive push — forward as-is
                         let _ = ws_writer.send(Message::Text(event.to_string().into())).await;
                     }
                 }

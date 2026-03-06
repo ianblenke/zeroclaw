@@ -480,12 +480,20 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // SSE broadcast channel for real-time events
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<serde_json::Value>(256);
     // Extract webhook secret for authentication
-    let webhook_secret_hash: Option<Arc<str>> =
-        config.channels_config.webhook.as_ref().and_then(|webhook| {
-            webhook.secret.as_ref().and_then(|raw_secret| {
-                let trimmed_secret = raw_secret.trim();
-                (!trimmed_secret.is_empty())
-                    .then(|| Arc::<str>::from(hash_webhook_secret(trimmed_secret)))
+    // Priority: ZEROCLAW_WEBHOOK_SECRET env var > config file
+    let webhook_secret_hash: Option<Arc<str>> = std::env::var("ZEROCLAW_WEBHOOK_SECRET")
+        .ok()
+        .and_then(|secret| {
+            let secret = secret.trim().to_string();
+            (!secret.is_empty()).then(|| Arc::<str>::from(hash_webhook_secret(&secret)))
+        })
+        .or_else(|| {
+            config.channels_config.webhook.as_ref().and_then(|webhook| {
+                webhook.secret.as_ref().and_then(|raw_secret| {
+                    let trimmed_secret = raw_secret.trim();
+                    (!trimmed_secret.is_empty())
+                        .then(|| Arc::<str>::from(hash_webhook_secret(trimmed_secret)))
+                })
             })
         });
 
@@ -1337,11 +1345,21 @@ async fn handle_internal_push(
     headers: HeaderMap,
     body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
+    // Allow loopback OR authenticated internal requests (e.g., nats-bridge)
     if !is_loopback_request(Some(peer_addr), &headers, state.trust_forwarded_headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Internal endpoint — loopback only"})),
-        );
+        let secret_ok = state.webhook_secret_hash.as_ref().map_or(false, |hash| {
+            headers
+                .get("X-Webhook-Secret")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| constant_time_eq(&hash_webhook_secret(v.trim()), hash.as_ref()))
+                .unwrap_or(false)
+        });
+        if !secret_ok {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Internal endpoint — loopback or X-Webhook-Secret required"})),
+            );
+        }
     }
 
     let Json(payload) = match body {
@@ -1370,8 +1388,8 @@ async fn handle_internal_push(
         "content": content,
         "source": payload.get("source").and_then(|s| s.as_str()).unwrap_or("cron"),
         "timestamp": chrono::Utc::now().to_rfc3339(),
-        // Pass through targeting fields for unicast delivery (client-side filtering)
         "target_session": payload.get("target_session").and_then(|s| s.as_str()),
+        "process": payload.get("process").and_then(|p| p.as_bool()).unwrap_or(false),
     });
 
     let receivers = state.event_tx.send(push_event).unwrap_or(0);
