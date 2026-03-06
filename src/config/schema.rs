@@ -6248,6 +6248,7 @@ impl Default for Config {
             agents_ipc: AgentsIpcConfig::default(),
             mcp: McpConfig::default(),
             model_support_vision: None,
+            tool_search: ToolSearchConfig::default(),
             wasm: WasmConfig::default(),
         }
     }

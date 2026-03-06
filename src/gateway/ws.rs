@@ -13,6 +13,7 @@ use super::AppState;
 use crate::agent::loop_::{build_shell_policy_instructions, build_tool_instructions_from_specs};
 use crate::memory::MemoryCategory;
 use crate::providers::ChatMessage;
+use crate::tools::traits::Tool;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -313,11 +314,6 @@ fn build_ws_system_prompt(
         _ => false,
     };
 
-    let mut tool_descs: Vec<(&str, &str)> = tool_specs
-        .iter()
-        .map(|spec| (spec.name.as_str(), spec.description.as_str()))
-        .collect();
-
     if tool_search_active {
         let core_names: std::collections::HashSet<&str> = config
             .tool_search
@@ -325,16 +321,15 @@ fn build_ws_system_prompt(
             .iter()
             .map(|s| s.as_str())
             .collect();
-        tool_descs.retain(|(name, _)| core_names.contains(name));
-        tool_descs.push((
-            "tool_search",
-            "Search for available tools by keyword.",
-        ));
         tool_specs.retain(|s| core_names.contains(s.name.as_str()));
-        // Add tool_search spec
         let search_tool = crate::tools::ToolSearchTool::new(Vec::new(), 0);
         tool_specs.push(search_tool.spec());
     }
+
+    let tool_descs: Vec<(&str, &str)> = tool_specs
+        .iter()
+        .map(|spec| (spec.name.as_str(), spec.description.as_str()))
+        .collect();
 
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)

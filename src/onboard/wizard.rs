@@ -236,6 +236,7 @@ pub async fn run_wizard_with_migration(
         agents_ipc: crate::config::AgentsIpcConfig::default(),
         mcp: crate::config::schema::McpConfig::default(),
         model_support_vision: None,
+        tool_search: crate::config::schema::ToolSearchConfig::default(),
         wasm: crate::config::WasmConfig::default(),
     };
 
@@ -752,6 +753,7 @@ async fn run_quick_setup_with_home(
         agents_ipc: crate::config::AgentsIpcConfig::default(),
         mcp: crate::config::schema::McpConfig::default(),
         model_support_vision: None,
+        tool_search: crate::config::schema::ToolSearchConfig::default(),
         wasm: crate::config::WasmConfig::default(),
     };
     if no_totp {
