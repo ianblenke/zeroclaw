@@ -381,6 +381,10 @@ pub struct Config {
     #[serde(default, alias = "mcpServers")]
     pub mcp: McpConfig,
 
+    /// Tool search configuration for context-efficient tool discovery (`[tool_search]`).
+    #[serde(default)]
+    pub tool_search: ToolSearchConfig,
+
     /// Vision support override for the active provider/model.
     /// - `None` (default): use provider's built-in default
     /// - `Some(true)`: force vision support on (e.g. Ollama running llava)
@@ -724,6 +728,70 @@ pub struct McpConfig {
     /// Configured MCP servers.
     #[serde(default, alias = "mcpServers")]
     pub servers: Vec<McpServerConfig>,
+}
+
+// ── Tool Search ─────────────────────────────────────────────────
+
+/// Tool search mode controls when tool search is active.
+///
+/// - `"disabled"`: all tools always injected into system prompt (no change).
+/// - `"auto"`: enable tool search when registered tool count exceeds `threshold`.
+/// - `"enabled"`: always use tool search regardless of tool count.
+fn default_tool_search_mode() -> String {
+    "auto".into()
+}
+
+fn default_tool_search_threshold() -> usize {
+    20
+}
+
+fn default_tool_search_max_results() -> usize {
+    5
+}
+
+fn default_tool_search_always_loaded() -> Vec<String> {
+    vec![
+        "shell".into(),
+        "file_read".into(),
+        "file_write".into(),
+        "memory_store".into(),
+        "memory_recall".into(),
+        "web_search_tool".into(),
+    ]
+}
+
+/// Context-efficient tool discovery configuration (`[tool_search]` section).
+///
+/// When active, only core tools and a `tool_search` meta-tool are injected into
+/// the system prompt. The model calls `tool_search(query)` to discover relevant
+/// tools on demand. This reduces context consumption and improves tool selection
+/// accuracy for smaller models with many registered tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ToolSearchConfig {
+    /// Search mode: `"disabled"`, `"auto"`, or `"enabled"`.
+    #[serde(default = "default_tool_search_mode")]
+    pub mode: String,
+    /// Tool count threshold for `"auto"` mode activation.
+    #[serde(default = "default_tool_search_threshold")]
+    pub threshold: usize,
+    /// Maximum tools returned per search query.
+    #[serde(default = "default_tool_search_max_results")]
+    pub max_results: usize,
+    /// Tool names always included in system prompt (never deferred to search).
+    #[serde(default = "default_tool_search_always_loaded")]
+    pub always_loaded_tools: Vec<String>,
+}
+
+impl Default for ToolSearchConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_tool_search_mode(),
+            threshold: default_tool_search_threshold(),
+            max_results: default_tool_search_max_results(),
+            always_loaded_tools: default_tool_search_always_loaded(),
+        }
+    }
 }
 
 // ── Agents IPC ──────────────────────────────────────────────────

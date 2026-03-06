@@ -74,6 +74,7 @@ pub mod subagent_manage;
 pub mod subagent_registry;
 pub mod subagent_spawn;
 pub mod task_plan;
+pub mod tool_search;
 pub mod traits;
 pub mod url_validation;
 pub mod wasm_module;
@@ -141,6 +142,7 @@ pub use subagent_manage::SubAgentManageTool;
 pub use subagent_registry::SubAgentRegistry;
 pub use subagent_spawn::SubAgentSpawnTool;
 pub use task_plan::TaskPlanTool;
+pub use tool_search::ToolSearchTool;
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};

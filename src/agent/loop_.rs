@@ -2924,6 +2924,28 @@ pub async fn process_message_with_session(
         }
     }
 
+    // ── Tool search: conditionally filter visible tool specs ──
+    let tool_search_active = match config.tool_search.mode.as_str() {
+        "enabled" => true,
+        "auto" => tools_registry.len() > config.tool_search.threshold,
+        _ => false, // "disabled" or unrecognized
+    };
+    if tool_search_active {
+        tracing::info!(
+            "Tool search active: {} tools registered (threshold {}), injecting tool_search meta-tool",
+            tools_registry.len(),
+            config.tool_search.threshold,
+        );
+        // Build full catalog snapshot for the search tool
+        let full_catalog: Vec<crate::tools::ToolSpec> =
+            tools_registry.iter().map(|t| t.spec()).collect();
+        let search_tool = tools::ToolSearchTool::new(
+            full_catalog,
+            config.tool_search.max_results,
+        );
+        tools_registry.push(Box::new(search_tool));
+    }
+
     let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
     let model_name = crate::config::resolve_default_model_id(
         config.default_model.as_deref(),
@@ -3024,6 +3046,21 @@ pub async fn process_message_with_session(
             "Query connected hardware for reported GPIO pins and LED pin. Use when user asks what pins are available.",
         ));
     }
+    // When tool search is active, filter tool_descs and tool specs to core tools only
+    if tool_search_active {
+        let core_names: std::collections::HashSet<&str> = config
+            .tool_search
+            .always_loaded_tools
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        tool_descs.retain(|(name, _)| core_names.contains(name));
+        tool_descs.push((
+            "tool_search",
+            "Search for available tools by keyword. Use when you need a capability not listed above.",
+        ));
+    }
+
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -3041,7 +3078,23 @@ pub async fn process_message_with_session(
         config.skills.prompt_injection_mode,
     );
     if !native_tools {
-        system_prompt.push_str(&build_tool_instructions(&tools_registry));
+        if tool_search_active {
+            // Only inject specs for always-loaded tools + tool_search
+            let core_names: std::collections::HashSet<&str> = config
+                .tool_search
+                .always_loaded_tools
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            let filtered_specs: Vec<crate::tools::ToolSpec> = tools_registry
+                .iter()
+                .filter(|t| core_names.contains(t.name()) || t.name() == "tool_search")
+                .map(|t| t.spec())
+                .collect();
+            system_prompt.push_str(&build_tool_instructions_from_specs(&filtered_specs));
+        } else {
+            system_prompt.push_str(&build_tool_instructions(&tools_registry));
+        }
     }
     system_prompt.push_str(&build_shell_policy_instructions(&config.autonomy));
 

@@ -306,10 +306,35 @@ fn build_ws_system_prompt(
         tools_registry.iter().map(|tool| tool.spec()).collect();
     tool_specs.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let tool_descs: Vec<(&str, &str)> = tool_specs
+    // Tool search filtering: when active, only show core tools + tool_search in prompt
+    let tool_search_active = match config.tool_search.mode.as_str() {
+        "enabled" => true,
+        "auto" => tool_specs.len() > config.tool_search.threshold,
+        _ => false,
+    };
+
+    let mut tool_descs: Vec<(&str, &str)> = tool_specs
         .iter()
         .map(|spec| (spec.name.as_str(), spec.description.as_str()))
         .collect();
+
+    if tool_search_active {
+        let core_names: std::collections::HashSet<&str> = config
+            .tool_search
+            .always_loaded_tools
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        tool_descs.retain(|(name, _)| core_names.contains(name));
+        tool_descs.push((
+            "tool_search",
+            "Search for available tools by keyword.",
+        ));
+        tool_specs.retain(|s| core_names.contains(s.name.as_str()));
+        // Add tool_search spec
+        let search_tool = crate::tools::ToolSearchTool::new(Vec::new(), 0);
+        tool_specs.push(search_tool.spec());
+    }
 
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
