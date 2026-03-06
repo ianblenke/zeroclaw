@@ -6,6 +6,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 const IMAGE_MARKER_PREFIX: &str = "[IMAGE:";
+const VIDEO_MARKER_PREFIX: &str = "[VIDEO:";
 const OPTIMIZED_IMAGE_MAX_DIMENSION: u32 = 512;
 const OPTIMIZED_IMAGE_TARGET_BYTES: usize = 256 * 1024;
 const ALLOWED_IMAGE_MIME_TYPES: &[&str] = &[
@@ -98,6 +99,50 @@ pub fn count_image_markers(messages: &[ChatMessage]) -> usize {
 
 pub fn contains_image_markers(messages: &[ChatMessage]) -> bool {
     count_image_markers(messages) > 0
+}
+
+/// Parse `[VIDEO:<url_or_data>]` markers from content, returning cleaned text and video refs.
+pub fn parse_video_markers(content: &str) -> (String, Vec<String>) {
+    let mut refs = Vec::new();
+    let mut cleaned = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel_start) = content[cursor..].find(VIDEO_MARKER_PREFIX) {
+        let start = cursor + rel_start;
+        cleaned.push_str(&content[cursor..start]);
+
+        let marker_start = start + VIDEO_MARKER_PREFIX.len();
+        let Some(rel_end) = content[marker_start..].find(']') else {
+            cleaned.push_str(&content[start..]);
+            cursor = content.len();
+            break;
+        };
+
+        let end = marker_start + rel_end;
+        let candidate = content[marker_start..end].trim();
+
+        if candidate.is_empty() {
+            cleaned.push_str(&content[start..=end]);
+        } else {
+            refs.push(candidate.to_string());
+        }
+
+        cursor = end + 1;
+    }
+
+    if cursor < content.len() {
+        cleaned.push_str(&content[cursor..]);
+    }
+
+    (cleaned.trim().to_string(), refs)
+}
+
+pub fn count_video_markers(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| parse_video_markers(&m.content).1.len())
+        .sum()
 }
 
 pub fn extract_ollama_image_payload(image_ref: &str) -> Option<String> {

@@ -457,6 +457,7 @@ enum MessagePart {
     Text { text: String },
     ImageUrl { image_url: ImageUrlPart },
     InputAudio { input_audio: InputAudioPart },
+    VideoUrl { video_url: VideoUrlPart },
 }
 
 #[derive(Debug, Serialize)]
@@ -468,6 +469,11 @@ struct ImageUrlPart {
 struct InputAudioPart {
     data: String,
     format: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VideoUrlPart {
+    url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1645,12 +1651,14 @@ impl OpenAiCompatibleProvider {
         }
 
         let (cleaned_text, image_refs) = multimodal::parse_image_markers(content);
+        let (cleaned_text, video_refs) = multimodal::parse_video_markers(&cleaned_text);
         let (cleaned_text, audio_refs) = parse_audio_markers(&cleaned_text);
-        if image_refs.is_empty() && audio_refs.is_empty() {
+        if image_refs.is_empty() && video_refs.is_empty() && audio_refs.is_empty() {
             return MessageContent::Text(content.to_string());
         }
 
-        let mut parts = Vec::with_capacity(image_refs.len() + audio_refs.len() + 1);
+        let mut parts =
+            Vec::with_capacity(image_refs.len() + video_refs.len() + audio_refs.len() + 1);
         let trimmed_text = cleaned_text.trim();
         if !trimmed_text.is_empty() {
             parts.push(MessagePart::Text {
@@ -1661,6 +1669,12 @@ impl OpenAiCompatibleProvider {
         for image_ref in image_refs {
             parts.push(MessagePart::ImageUrl {
                 image_url: ImageUrlPart { url: image_ref },
+            });
+        }
+
+        for video_ref in video_refs {
+            parts.push(MessagePart::VideoUrl {
+                video_url: VideoUrlPart { url: video_ref },
             });
         }
 
