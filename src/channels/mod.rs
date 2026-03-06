@@ -4394,23 +4394,37 @@ pub fn build_system_prompt_with_mode(
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
 
-    // ── 0. Current local time (so the model never needs to guess) ──
+    // ── 0. Current time in multiple zones (so the model never needs to calculate) ──
     {
+        use chrono_tz::Tz;
         let utc_now = chrono::Utc::now();
-        let time_str = if let Ok(tz_name) = std::env::var("TZ") {
-            if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
-                let local = utc_now.with_timezone(&tz);
-                local.format("%I:%M %p %Z on %A, %B %-d, %Y").to_string()
-            } else {
-                utc_now.format("%I:%M %p UTC on %A, %B %-d, %Y").to_string()
-            }
+        let local_tz: Option<Tz> = std::env::var("TZ")
+            .ok()
+            .and_then(|s| s.parse().ok());
+        let local_str = if let Some(tz) = local_tz {
+            utc_now.with_timezone(&tz)
+                .format("%I:%M %p %Z on %A, %B %-d, %Y").to_string()
         } else {
-            chrono::Local::now().format("%I:%M %p %Z on %A, %B %-d, %Y").to_string()
+            chrono::Local::now()
+                .format("%I:%M %p %Z on %A, %B %-d, %Y").to_string()
         };
-        let _ = writeln!(
-            prompt,
-            "## Current Time\n\nThe current local time is: {time_str}.\n",
-        );
+        let _ = writeln!(prompt, "## Current Time\n");
+        let _ = writeln!(prompt, "Your local time (Inglis, FL): {local_str}");
+        // Reference times for common timezone queries
+        let ref_zones: &[(&str, Tz)] = &[
+            ("Pacific (California)", chrono_tz::America::Los_Angeles),
+            ("Mountain (Denver)", chrono_tz::America::Denver),
+            ("Central (Chicago)", chrono_tz::America::Chicago),
+            ("UTC", chrono_tz::UTC),
+            ("London", chrono_tz::Europe::London),
+            ("Paris", chrono_tz::Europe::Paris),
+            ("Tokyo", chrono_tz::Asia::Tokyo),
+        ];
+        for (label, tz) in ref_zones {
+            let t = utc_now.with_timezone(tz).format("%I:%M %p %Z").to_string();
+            let _ = writeln!(prompt, "{label}: {t}");
+        }
+        let _ = writeln!(prompt);
     }
 
     // ── 1. Tooling ──────────────────────────────────────────────
