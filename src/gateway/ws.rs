@@ -283,18 +283,51 @@ fn finalize_ws_response(
     leak_guard: &crate::config::OutboundLeakGuardConfig,
 ) -> String {
     let sanitized = sanitize_ws_response(response, tools, leak_guard);
-    if !sanitized.trim().is_empty() {
-        return sanitized;
-    }
-
-    if let Some(tool_output) = extract_latest_tool_output(history) {
+    let base = if !sanitized.trim().is_empty() {
+        sanitized
+    } else if let Some(tool_output) = extract_latest_tool_output(history) {
         let excerpt = crate::util::truncate_with_ellipsis(tool_output.trim(), 1200);
-        return format!(
+        format!(
             "Tool execution completed, but the model returned no final text response.\n\nLatest tool output:\n{excerpt}"
-        );
-    }
+        )
+    } else {
+        EMPTY_WS_RESPONSE_FALLBACK.to_string()
+    };
 
-    EMPTY_WS_RESPONSE_FALLBACK.to_string()
+    // Strip LLM-fabricated [IMAGE:...] markers that don't contain real base64 data URIs.
+    // Real markers look like [IMAGE:data:image/jpeg;base64,/9j/...] and come from tool results.
+    // Fake ones look like [IMAGE: Front door area showing...] — just descriptions.
+    strip_fake_image_markers(&base)
+}
+
+/// Remove `[IMAGE:...]` markers that don't contain valid `data:image/` base64 URIs.
+fn strip_fake_image_markers(text: &str) -> String {
+    if !text.contains("[IMAGE:") {
+        return text.to_string();
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut search_from = 0;
+    while let Some(start) = text[search_from..].find("[IMAGE:") {
+        let abs_start = search_from + start;
+        result.push_str(&text[search_from..abs_start]);
+        if let Some(end) = text[abs_start..].find(']') {
+            let marker = &text[abs_start..abs_start + end + 1];
+            // Keep only real markers with data:image/ base64 URIs
+            if marker.contains("data:image/") && marker.contains(";base64,") {
+                result.push_str(marker);
+            }
+            // else: fake marker — skip it
+            search_from = abs_start + end + 1;
+        } else {
+            // No closing bracket — keep remaining text as-is
+            result.push_str(&text[abs_start..]);
+            search_from = text.len();
+        }
+    }
+    result.push_str(&text[search_from..]);
+    // Clean up extra whitespace left by removed markers
+    let cleaned = result.replace("  ", " ").trim().to_string();
+    cleaned
 }
 
 fn build_ws_system_prompt(
@@ -428,12 +461,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
     // Build system prompt once for the session
     let system_prompt = {
         let config_guard = state.config.lock();
-        build_ws_system_prompt(
+        let mut prompt = build_ws_system_prompt(
             &config_guard,
             &state.model,
             state.tools_registry_exec.as_ref(),
             state.provider.supports_native_tools(),
-        )
+        );
+        prompt.push_str(&format!(
+            "\n\n## Session Context\nThis voice session's ID is `{session_id}`. \
+             Use this when calling tools that require a session_id parameter (e.g. nats_subscribe)."
+        ));
+        prompt
     };
 
     // Restore persisted history (if any) and replay to the client before processing new input.
@@ -562,6 +600,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 // even during agent response streaming.
                 let mut chunks_sent = false;
                 let mut in_final_response = false;
+                let mut collected_images: Vec<String> = Vec::new();
 
                 loop {
                     tokio::select! {
@@ -570,6 +609,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 Some(d) => {
                                     if d == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
                                         in_final_response = true;
+                                    } else if d.starts_with(crate::agent::loop_::IMAGE_DATA_SENTINEL) {
+                                        // Collect image markers from tool results for inline rendering
+                                        collected_images.push(d[crate::agent::loop_::IMAGE_DATA_SENTINEL.len()..].to_string());
                                     } else if d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_SENTINEL)
                                         || d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_BLOCK_SENTINEL)
                                     {
@@ -603,12 +645,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                     Ok(Ok(response)) => {
                         let leak_guard_cfg =
                             { state.config.lock().security.outbound_leak_guard.clone() };
-                        let safe_response = finalize_ws_response(
+                        let mut safe_response = finalize_ws_response(
                             &response,
                             &history,
                             state.tools_registry_exec.as_ref(),
                             &leak_guard_cfg,
                         );
+
+                        // Append any images collected from tool results
+                        if !collected_images.is_empty() {
+                            for img in &collected_images {
+                                safe_response.push('\n');
+                                safe_response.push_str(img);
+                            }
+                        }
 
                         // If nothing was streamed, send the full response as a chunk.
                         if !chunks_sent {
@@ -681,153 +731,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         continue;
                     }
 
-                    let process = event.get("process").and_then(|p| p.as_bool()).unwrap_or(false);
                     let content = event.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    let has_audio = event.get("audio").and_then(|a| a.as_str()).map_or(false, |a| !a.is_empty());
 
-                    if process && !content.is_empty() {
-                        // Send notification chime to client
+                    if !content.is_empty() || has_audio {
+                        // Send chime before proactive message
                         let chime = serde_json::json!({"type": "notification_chime"});
                         let _ = ws_writer.send(Message::Text(chime.to_string().into())).await;
 
-                        // Run agent loop with NO session history (proactive events need
-                        // minimal context to avoid filling the LLM context window).
-                        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<String>(64);
-                        let state_for_task = state.clone();
-                        let content_owned = content.to_string();
-
-                        let agent_handle = tokio::spawn(async move {
-                            super::run_gateway_streaming_chat_with_tools(
-                                &state_for_task,
-                                &content_owned,
-                                None, // No session → fresh context, avoids history bloat
-                                delta_tx,
-                            )
-                            .await
-                        });
-
-                        let provider_label = state
-                            .config
-                            .lock()
-                            .default_provider
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string());
-
-                        let _ = state.event_tx.send(serde_json::json!({
-                            "type": "agent_start",
-                            "provider": provider_label,
-                            "model": state.model,
-                            "source": "proactive",
-                        }));
-
-                        // Stream word-level deltas to client
-                        let mut chunks_sent = false;
-                        let mut in_final_response = false;
-
-                        loop {
-                            tokio::select! {
-                                delta = delta_rx.recv() => {
-                                    match delta {
-                                        Some(d) => {
-                                            if d == crate::agent::loop_::DRAFT_CLEAR_SENTINEL {
-                                                in_final_response = true;
-                                            } else if d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_SENTINEL)
-                                                || d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_BLOCK_SENTINEL)
-                                            {
-                                                // Progress updates — skip.
-                                            } else if in_final_response {
-                                                let chunk_msg = serde_json::json!({
-                                                    "type": "chunk",
-                                                    "content": d,
-                                                });
-                                                let _ = ws_writer
-                                                    .send(Message::Text(chunk_msg.to_string().into()))
-                                                    .await;
-                                                chunks_sent = true;
-                                            }
-                                        }
-                                        None => break,
-                                    }
-                                }
-                                inner_broadcast = broadcast_rx.recv() => {
-                                    if let Ok(ev) = inner_broadcast {
-                                        if ev.get("type").and_then(|t| t.as_str()) == Some("proactive") {
-                                            let tgt = ev.get("target_session").and_then(|t| t.as_str());
-                                            let for_me = tgt.is_none()
-                                                || tgt == Some(ws_session_id.as_str())
-                                                || tgt == Some(session_id.as_str());
-                                            let is_process = ev.get("process").and_then(|p| p.as_bool()).unwrap_or(false);
-                                            // During processing, forward non-process proactive events directly
-                                            if for_me && !is_process {
-                                                let _ = ws_writer.send(Message::Text(ev.to_string().into())).await;
-                                            }
-                                            // process:true events during streaming are dropped (avoid recursion)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Await agent result
-                        match agent_handle.await {
-                            Ok(Ok(response)) => {
-                                let leak_guard_cfg =
-                                    { state.config.lock().security.outbound_leak_guard.clone() };
-                                let safe_response = finalize_ws_response(
-                                    &response,
-                                    &history,
-                                    state.tools_registry_exec.as_ref(),
-                                    &leak_guard_cfg,
-                                );
-
-                                if !chunks_sent {
-                                    let chunk_msg = serde_json::json!({
-                                        "type": "chunk",
-                                        "content": safe_response,
-                                    });
-                                    let _ = ws_writer
-                                        .send(Message::Text(chunk_msg.to_string().into()))
-                                        .await;
-                                }
-
-                                history.push(ChatMessage::assistant(&safe_response));
-                                persist_ws_history(&state, &session_id, &history).await;
-
-                                let done = serde_json::json!({
-                                    "type": "done",
-                                    "full_response": safe_response,
-                                });
-                                let _ = ws_writer
-                                    .send(Message::Text(done.to_string().into()))
-                                    .await;
-
-                                let _ = state.event_tx.send(serde_json::json!({
-                                    "type": "agent_end",
-                                    "provider": provider_label,
-                                    "model": state.model,
-                                }));
-                            }
-                            Ok(Err(e)) => {
-                                let sanitized = crate::providers::sanitize_api_error(&e.to_string());
-                                let err = serde_json::json!({
-                                    "type": "error",
-                                    "message": sanitized,
-                                });
-                                let _ = ws_writer
-                                    .send(Message::Text(err.to_string().into()))
-                                    .await;
-                            }
-                            Err(e) => {
-                                let err = serde_json::json!({
-                                    "type": "error",
-                                    "message": format!("Proactive agent task panicked: {e}"),
-                                });
-                                let _ = ws_writer
-                                    .send(Message::Text(err.to_string().into()))
-                                    .await;
-                            }
-                        }
-                    } else if !content.is_empty() {
-                        // Regular proactive push — forward as-is
+                        // Forward pre-rendered event (text + optional audio)
                         let _ = ws_writer.send(Message::Text(event.to_string().into())).await;
                     }
                 }

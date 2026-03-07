@@ -785,6 +785,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/config", put(api::handle_api_config_put))
         .layer(RequestBodyLimitLayer::new(1_048_576));
 
+    // Internal push needs larger body limit (2MB) for pre-rendered audio payloads
+    let internal_push_router = Router::new()
+        .route("/api/internal/push", post(handle_internal_push))
+        .layer(RequestBodyLimitLayer::new(2_097_152));
+
     // The OpenAI-compatible endpoints use a larger body limit (512KB) because
     // chat histories can be much bigger than the default 64KB webhook limit.
     // They get their own nested router with a separate body limit layer.
@@ -802,8 +807,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             openai_compat::CHAT_COMPLETIONS_MAX_BODY_SIZE,
         ));
 
-    // Build router with middleware
-    let app = Router::new()
+    // Main routes with default 64KB body limit
+    let main_routes = Router::new()
         // ── Existing routes ──
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
@@ -847,18 +852,22 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/cli-tools", get(api::handle_api_cli_tools))
         .route("/api/health", get(api::handle_api_health))
         .route("/api/node-control", post(handle_node_control))
-        // ── Internal push (proactive messaging) ──
-        .route("/api/internal/push", post(handle_internal_push))
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         // ── WebSocket agent chat ──
         .route("/ws/chat", get(ws::handle_ws_chat))
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
-        // ── Config PUT with larger body limit ──
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE));
+
+    // Build final app: merge main routes (64KB limit) with special routes (own limits)
+    let app = Router::new()
+        .merge(main_routes)
+        // ── Config PUT with larger body limit (1MB) ──
         .merge(config_put_router)
+        // ── Internal push with larger body limit (2MB for audio payloads) ──
+        .merge(internal_push_router)
         .with_state(state)
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
@@ -1376,20 +1385,39 @@ async fn handle_internal_push(
         .get("content")
         .and_then(|c| c.as_str())
         .unwrap_or("");
-    if content.is_empty() {
+    let audio = payload
+        .get("audio")
+        .and_then(|a| a.as_str())
+        .unwrap_or("");
+    let image = payload
+        .get("image")
+        .and_then(|i| i.as_str())
+        .unwrap_or("");
+    if content.is_empty() && audio.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "\"content\" field is required and must be non-empty"})),
+            Json(serde_json::json!({"error": "\"content\" or \"audio\" field is required"})),
         );
     }
 
+    let audio_value: serde_json::Value = if audio.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(audio.to_string())
+    };
+    let image_value: serde_json::Value = if image.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(image.to_string())
+    };
     let push_event = serde_json::json!({
         "type": "proactive",
         "content": content,
+        "audio": audio_value,
+        "image": image_value,
         "source": payload.get("source").and_then(|s| s.as_str()).unwrap_or("cron"),
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "target_session": payload.get("target_session").and_then(|s| s.as_str()),
-        "process": payload.get("process").and_then(|p| p.as_bool()).unwrap_or(false),
     });
 
     let receivers = state.event_tx.send(push_event).unwrap_or(0);
