@@ -540,6 +540,42 @@ fn parse_audio_markers(content: &str) -> (String, Vec<(String, String)>) {
     (cleaned.trim().to_string(), refs)
 }
 
+/// Extract the content of `<think>...</think>` blocks from model output.
+/// Returns the concatenated thinking content, or `None` if no blocks found.
+fn extract_think_content(s: &str) -> Option<String> {
+    let mut thinking = String::new();
+    let mut rest = s;
+    loop {
+        if let Some(start) = rest.find("<think>") {
+            let after_tag = &rest[start + "<think>".len()..];
+            if let Some(end) = after_tag.find("</think>") {
+                if !thinking.is_empty() {
+                    thinking.push('\n');
+                }
+                thinking.push_str(after_tag[..end].trim());
+                rest = &after_tag[end + "</think>".len()..];
+            } else {
+                // Unclosed tag: capture remaining as thinking
+                let remaining = after_tag.trim();
+                if !remaining.is_empty() {
+                    if !thinking.is_empty() {
+                        thinking.push('\n');
+                    }
+                    thinking.push_str(remaining);
+                }
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if thinking.is_empty() {
+        None
+    } else {
+        Some(thinking)
+    }
+}
+
 /// Remove `<think>...</think>` blocks from model output.
 /// Some reasoning models (e.g. MiniMax) embed their chain-of-thought inline
 /// in the `content` field rather than a separate `reasoning_content` field.
@@ -1893,7 +1929,14 @@ impl OpenAiCompatibleProvider {
 
     fn parse_native_response(message: ResponseMessage) -> ProviderChatResponse {
         let text = message.effective_content_optional();
-        let reasoning_content = message.reasoning_content.clone();
+        // Use explicit reasoning_content field if provided; otherwise extract
+        // from <think> blocks in the content field (e.g. Qwen 3.5 via llama.cpp).
+        let reasoning_content = message.reasoning_content.clone().or_else(|| {
+            message
+                .content
+                .as_deref()
+                .and_then(extract_think_content)
+        });
         let tool_calls = message
             .tool_calls
             .unwrap_or_default()

@@ -264,6 +264,9 @@ pub(crate) const DRAFT_PROGRESS_BLOCK_SENTINEL: &str = "\x00PROGRESS_BLOCK\x00";
 pub(crate) const DRAFT_PROGRESS_SECTION_START: &str = "\n<!-- progress-start -->\n";
 /// Progress-section marker inserted into accumulated streaming drafts.
 pub(crate) const DRAFT_PROGRESS_SECTION_END: &str = "\n<!-- progress-end -->\n";
+/// Sentinel prefix for reasoning/thinking content from thinking models.
+/// The WS handler forwards this as a separate `"thinking"` WebSocket message.
+pub(crate) const REASONING_CONTENT_SENTINEL: &str = "\x00REASONING\x00";
 /// Sentinel prefix for image data extracted from tool results.
 /// The WS handler collects these and appends them to the final response.
 pub(crate) const IMAGE_DATA_SENTINEL: &str = "\x00IMAGE\x00";
@@ -1418,6 +1421,18 @@ pub(crate) async fn run_tool_call_loop(
                 // Preserve native tool call IDs in assistant history so role=tool
                 // follow-up messages can reference the exact call id.
                 let reasoning_content = resp.reasoning_content.clone();
+
+                // Forward reasoning/thinking content to the WebSocket before the response
+                if let Some(rc) = reasoning_content.as_deref() {
+                    if !rc.trim().is_empty() {
+                        if let Some(ref tx) = on_delta {
+                            let _ = tx
+                                .send(format!("{REASONING_CONTENT_SENTINEL}{rc}"))
+                                .await;
+                        }
+                    }
+                }
+
                 let assistant_history_content = if resp.tool_calls.is_empty() {
                     if use_native_tools {
                         build_native_assistant_history_from_parsed_calls(

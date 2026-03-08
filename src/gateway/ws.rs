@@ -612,6 +612,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                     } else if d.starts_with(crate::agent::loop_::IMAGE_DATA_SENTINEL) {
                                         // Collect image markers from tool results for inline rendering
                                         collected_images.push(d[crate::agent::loop_::IMAGE_DATA_SENTINEL.len()..].to_string());
+                                    } else if d.starts_with(crate::agent::loop_::REASONING_CONTENT_SENTINEL) {
+                                        // Forward reasoning/thinking content as a separate message
+                                        let content = &d[crate::agent::loop_::REASONING_CONTENT_SENTINEL.len()..];
+                                        let thinking_msg = serde_json::json!({
+                                            "type": "thinking",
+                                            "content": content,
+                                        });
+                                        let _ = ws_writer
+                                            .send(Message::Text(thinking_msg.to_string().into()))
+                                            .await;
                                     } else if d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_SENTINEL)
                                         || d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_BLOCK_SENTINEL)
                                     {
