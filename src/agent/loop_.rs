@@ -1978,9 +1978,9 @@ pub(crate) async fn run_tool_call_loop(
                         }
                     }
                 }
-                if outcome.output.contains("[VIDEO_EMBED:") {
+                if outcome.output.contains("[VIDEO_EMBED:/invidious/embed/") {
                     let mut search_from = 0;
-                    while let Some(start) = outcome.output[search_from..].find("[VIDEO_EMBED:") {
+                    while let Some(start) = outcome.output[search_from..].find("[VIDEO_EMBED:/invidious/embed/") {
                         let abs_start = search_from + start;
                         if let Some(end) = outcome.output[abs_start..].find(']') {
                             let marker = &outcome.output[abs_start..abs_start + end + 1];
