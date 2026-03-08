@@ -330,6 +330,29 @@ fn strip_fake_image_markers(text: &str) -> String {
     cleaned
 }
 
+/// Remove all `[VIDEO_EMBED:...]` markers from text.
+/// Used to strip model-echoed markers that may be malformed/partial before
+/// appending guaranteed well-formed markers collected server-side from tool results.
+fn strip_video_embed_markers(text: &str) -> String {
+    if !text.contains("[VIDEO_EMBED:") {
+        return text.to_string();
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut search_from = 0;
+    while let Some(start) = text[search_from..].find("[VIDEO_EMBED:") {
+        let abs_start = search_from + start;
+        result.push_str(&text[search_from..abs_start]);
+        if let Some(end) = text[abs_start..].find(']') {
+            search_from = abs_start + end + 1;
+        } else {
+            // No closing bracket — discard the rest of the partial marker
+            search_from = text.len();
+        }
+    }
+    result.push_str(&text[search_from..]);
+    result.replace("  ", " ").trim().to_string()
+}
+
 fn build_ws_system_prompt(
     config: &crate::config::Config,
     model: &str,
@@ -690,8 +713,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                             }
                         }
 
-                        // Append any video embeds collected from tool results
+                        // Strip model-echoed [VIDEO_EMBED:...] markers from the
+                        // response text — they may be malformed or partial.  The
+                        // server-collected markers below are guaranteed well-formed.
                         if !collected_videos.is_empty() {
+                            safe_response = strip_video_embed_markers(&safe_response);
                             for vid in &collected_videos {
                                 safe_response.push('\n');
                                 safe_response.push_str(vid);
