@@ -199,15 +199,21 @@ fn boxed_registry_from_arcs(tools: Vec<Arc<dyn Tool>>) -> Vec<Box<dyn Tool>> {
     tools.into_iter().map(ArcDelegatingTool::boxed).collect()
 }
 
-/// Add background tool execution capabilities to a tool registry
-pub fn add_bg_tools(tools: Vec<Box<dyn Tool>>) -> (Vec<Box<dyn Tool>>, BgJobStore) {
+/// Add background tool execution capabilities to a tool registry.
+///
+/// When `mcp_registry` is provided, `bg_run` can dispatch MCP tools without
+/// adding them to its internal tool list (avoiding context pollution).
+pub fn add_bg_tools(
+    tools: Vec<Box<dyn Tool>>,
+    mcp_registry: Option<Arc<mcp_client::McpRegistry>>,
+) -> (Vec<Box<dyn Tool>>, BgJobStore) {
     let bg_job_store = BgJobStore::new();
     let tool_arcs: Vec<Arc<dyn Tool>> = tools
         .into_iter()
         .map(|t| Arc::from(t) as Arc<dyn Tool>)
         .collect();
     let tools_arc = Arc::new(tool_arcs);
-    let bg_run = BgRunTool::new(bg_job_store.clone(), Arc::clone(&tools_arc));
+    let bg_run = BgRunTool::new(bg_job_store.clone(), Arc::clone(&tools_arc), mcp_registry);
     let bg_status = BgStatusTool::new(bg_job_store.clone());
     let mut extended: Vec<Arc<dyn Tool>> = (*tools_arc).clone();
     extended.push(Arc::new(bg_run));
@@ -314,6 +320,7 @@ pub fn all_tools(
         agents,
         fallback_api_key,
         root_config,
+        None,
     )
 }
 
@@ -333,6 +340,7 @@ pub fn all_tools_with_runtime(
     agents: &HashMap<String, DelegateAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
+    mcp_registry: Option<Arc<mcp_client::McpRegistry>>,
 ) -> Vec<Box<dyn Tool>> {
     let has_shell_access = runtime.has_shell_access();
     let has_filesystem_access = runtime.has_filesystem_access();
@@ -681,7 +689,7 @@ pub fn all_tools_with_runtime(
     // This ensures `bg_run` / `bg_status` are available anywhere the
     // runtime tool graph is used.
     let built_tools = boxed_registry_from_arcs(tool_arcs);
-    let (extended_tools, _bg_job_store) = add_bg_tools(built_tools);
+    let (extended_tools, _bg_job_store) = add_bg_tools(built_tools, mcp_registry);
     extended_tools
 }
 
@@ -892,6 +900,7 @@ mod tests {
             &HashMap::new(),
             None,
             &cfg,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"wasm_module"));
@@ -933,6 +942,7 @@ mod tests {
             &HashMap::new(),
             None,
             &cfg,
+            None,
         );
 
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();

@@ -281,6 +281,11 @@ impl McpRegistry {
     pub fn tool_count(&self) -> usize {
         self.tool_index.len()
     }
+
+    /// Check whether a tool with the given prefixed name is registered (sync).
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tool_index.contains_key(name)
+    }
 }
 
 #[cfg(test)]

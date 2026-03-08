@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
+use super::mcp_client::McpRegistry;
 use super::traits::{Tool, ToolResult};
 
 /// Hard timeout for background tool execution (seconds).
@@ -216,6 +217,47 @@ fn generate_job_id() -> String {
     format!("j-{id:016x}")
 }
 
+// ── MCP executor (lightweight Tool for background MCP dispatch) ──────────────
+
+/// Minimal [`Tool`] impl that delegates execution to an [`McpRegistry`].
+///
+/// Created on-the-fly by [`BgRunTool::find_tool`] when the requested tool is
+/// not in the built-in registry but exists in a connected MCP server.
+struct McpExecutor {
+    name: String,
+    registry: Arc<McpRegistry>,
+}
+
+#[async_trait]
+impl Tool for McpExecutor {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "MCP tool (background)"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        match self.registry.call_tool(&self.name, args).await {
+            Ok(output) => Ok(ToolResult {
+                success: true,
+                output,
+                error: None,
+            }),
+            Err(e) => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+}
+
 // ── BgRun Tool ───────────────────────────────────────────────────────────────
 
 /// Tool to dispatch a background job.
@@ -227,17 +269,38 @@ pub struct BgRunTool {
     job_store: BgJobStore,
     /// Reference to the tool registry for finding and cloning tools.
     tools: Arc<Vec<Arc<dyn Tool>>>,
+    /// Optional MCP registry for fallback tool lookup (avoids context pollution).
+    mcp_registry: Option<Arc<McpRegistry>>,
 }
 
 impl BgRunTool {
     /// Create a new bg_run tool.
-    pub fn new(job_store: BgJobStore, tools: Arc<Vec<Arc<dyn Tool>>>) -> Self {
-        Self { job_store, tools }
+    pub fn new(
+        job_store: BgJobStore,
+        tools: Arc<Vec<Arc<dyn Tool>>>,
+        mcp_registry: Option<Arc<McpRegistry>>,
+    ) -> Self {
+        Self {
+            job_store,
+            tools,
+            mcp_registry,
+        }
     }
 
-    /// Find a tool by name in the registry.
+    /// Find a tool by name — checks built-in tools first, then MCP registry.
     fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.iter().find(|t| t.name() == name).cloned()
+        if let Some(t) = self.tools.iter().find(|t| t.name() == name).cloned() {
+            return Some(t);
+        }
+        if let Some(ref registry) = self.mcp_registry {
+            if registry.has_tool(name) {
+                return Some(Arc::new(McpExecutor {
+                    name: name.to_string(),
+                    registry: Arc::clone(registry),
+                }));
+            }
+        }
+        None
     }
 }
 

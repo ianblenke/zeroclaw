@@ -1127,9 +1127,9 @@ pub(crate) async fn run_tool_call_loop(
         if should_emit_verbose_progress(progress_mode) {
             if let Some(ref tx) = on_delta {
                 let phase = if iteration == 0 {
-                    "\u{1f914} Thinking...\n".to_string()
+                    "\u{1f9e0} Thinking...\n".to_string()
                 } else {
-                    format!("\u{1f914} Thinking (round {})...\n", iteration + 1)
+                    format!("\u{1f9e0} Thinking (round {})...\n", iteration + 1)
                 };
                 let _ = tx.send(format!("{DRAFT_PROGRESS_SENTINEL}{phase}")).await;
             }
@@ -2245,6 +2245,24 @@ pub async fn run(
         );
     }
 
+    // ── MCP (connect early so bg_run can dispatch MCP tools) ────
+    let mcp_registry: Option<std::sync::Arc<tools::McpRegistry>> =
+        if config.mcp.enabled && !config.mcp.servers.is_empty() {
+            tracing::info!(
+                "Initializing MCP client — {} server(s) configured",
+                config.mcp.servers.len()
+            );
+            match tools::McpRegistry::connect_all(&config.mcp.servers).await {
+                Ok(registry) => Some(std::sync::Arc::new(registry)),
+                Err(e) => {
+                    tracing::error!("MCP registry failed to initialize: {e:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     // ── Tools (including memory tools and peripherals) ────────────
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (
@@ -2268,6 +2286,7 @@ pub async fn run(
         &config.agents,
         config.api_key.as_deref(),
         &config,
+        mcp_registry.clone(),
     );
 
     let peripheral_tools: Vec<Box<dyn Tool>> =
@@ -2277,38 +2296,26 @@ pub async fn run(
         tools_registry.extend(peripheral_tools);
     }
 
-    // Wire MCP tools into the registry — non-fatal on failure.
-    if config.mcp.enabled && !config.mcp.servers.is_empty() {
-        tracing::info!(
-            "Initializing MCP client — {} server(s) configured",
-            config.mcp.servers.len()
-        );
-        match tools::McpRegistry::connect_all(&config.mcp.servers).await {
-            Ok(registry) => {
-                let registry = std::sync::Arc::new(registry);
-                let names = registry.tool_names();
-                let mut registered = 0usize;
-                for name in names {
-                    if let Some(def) = registry.get_tool_def(&name).await {
-                        let wrapper = tools::McpToolWrapper::new(
-                            name,
-                            def,
-                            std::sync::Arc::clone(&registry),
-                        );
-                        tools_registry.push(Box::new(wrapper));
-                        registered += 1;
-                    }
-                }
-                tracing::info!(
-                    "MCP: {} tool(s) registered from {} server(s)",
-                    registered,
-                    registry.server_count()
+    // Wire MCP tools into the registry for model listing.
+    if let Some(ref registry) = mcp_registry {
+        let names = registry.tool_names();
+        let mut registered = 0usize;
+        for name in names {
+            if let Some(def) = registry.get_tool_def(&name).await {
+                let wrapper = tools::McpToolWrapper::new(
+                    name,
+                    def,
+                    std::sync::Arc::clone(registry),
                 );
-            }
-            Err(e) => {
-                tracing::error!("MCP registry failed to initialize: {e:#}");
+                tools_registry.push(Box::new(wrapper));
+                registered += 1;
             }
         }
+        tracing::info!(
+            "MCP: {} tool(s) registered from {} server(s)",
+            registered,
+            registry.server_count()
+        );
     }
 
     // ── Resolve provider ─────────────────────────────────────────
@@ -2900,6 +2907,24 @@ pub async fn process_message_with_session(
         config.api_key.as_deref(),
     )?);
 
+    // ── MCP (connect early so bg_run can dispatch MCP tools) ────
+    let mcp_registry: Option<std::sync::Arc<tools::McpRegistry>> =
+        if config.mcp.enabled && !config.mcp.servers.is_empty() {
+            tracing::info!(
+                "Initializing MCP client — {} server(s) configured",
+                config.mcp.servers.len()
+            );
+            match tools::McpRegistry::connect_all(&config.mcp.servers).await {
+                Ok(registry) => Some(std::sync::Arc::new(registry)),
+                Err(e) => {
+                    tracing::error!("MCP registry failed to initialize: {e:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (
             config.composio.api_key.as_deref(),
@@ -2922,43 +2947,32 @@ pub async fn process_message_with_session(
         &config.agents,
         config.api_key.as_deref(),
         &config,
+        mcp_registry.clone(),
     );
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
     tools_registry.extend(peripheral_tools);
 
-    // Wire MCP tools into the registry — non-fatal on failure.
-    if config.mcp.enabled && !config.mcp.servers.is_empty() {
-        tracing::info!(
-            "Initializing MCP client — {} server(s) configured",
-            config.mcp.servers.len()
-        );
-        match tools::McpRegistry::connect_all(&config.mcp.servers).await {
-            Ok(registry) => {
-                let registry = std::sync::Arc::new(registry);
-                let names = registry.tool_names();
-                let mut registered = 0usize;
-                for name in names {
-                    if let Some(def) = registry.get_tool_def(&name).await {
-                        let wrapper = tools::McpToolWrapper::new(
-                            name,
-                            def,
-                            std::sync::Arc::clone(&registry),
-                        );
-                        tools_registry.push(Box::new(wrapper));
-                        registered += 1;
-                    }
-                }
-                tracing::info!(
-                    "MCP: {} tool(s) registered from {} server(s)",
-                    registered,
-                    registry.server_count()
+    // Wire MCP tools into the registry for model listing.
+    if let Some(ref registry) = mcp_registry {
+        let names = registry.tool_names();
+        let mut registered = 0usize;
+        for name in names {
+            if let Some(def) = registry.get_tool_def(&name).await {
+                let wrapper = tools::McpToolWrapper::new(
+                    name,
+                    def,
+                    std::sync::Arc::clone(registry),
                 );
-            }
-            Err(e) => {
-                tracing::error!("MCP registry failed to initialize: {e:#}");
+                tools_registry.push(Box::new(wrapper));
+                registered += 1;
             }
         }
+        tracing::info!(
+            "MCP: {} tool(s) registered from {} server(s)",
+            registered,
+            registry.server_count()
+        );
     }
 
     // ── Tool search: conditionally filter visible tool specs ──
