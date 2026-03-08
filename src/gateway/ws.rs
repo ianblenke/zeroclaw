@@ -601,6 +601,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 let mut chunks_sent = false;
                 let mut in_final_response = false;
                 let mut collected_images: Vec<String> = Vec::new();
+                let mut collected_videos: Vec<String> = Vec::new();
 
                 loop {
                     tokio::select! {
@@ -612,6 +613,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                     } else if d.starts_with(crate::agent::loop_::IMAGE_DATA_SENTINEL) {
                                         // Collect image markers from tool results for inline rendering
                                         collected_images.push(d[crate::agent::loop_::IMAGE_DATA_SENTINEL.len()..].to_string());
+                                    } else if d.starts_with(crate::agent::loop_::VIDEO_EMBED_SENTINEL) {
+                                        // Collect video embed markers from tool results for inline rendering
+                                        collected_videos.push(d[crate::agent::loop_::VIDEO_EMBED_SENTINEL.len()..].to_string());
                                     } else if d.starts_with(crate::agent::loop_::REASONING_CONTENT_SENTINEL) {
                                         // Forward reasoning/thinking content as a separate message
                                         let content = &d[crate::agent::loop_::REASONING_CONTENT_SENTINEL.len()..];
@@ -683,6 +687,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                             for img in &collected_images {
                                 safe_response.push('\n');
                                 safe_response.push_str(img);
+                            }
+                        }
+
+                        // Append any video embeds collected from tool results
+                        if !collected_videos.is_empty() {
+                            for vid in &collected_videos {
+                                safe_response.push('\n');
+                                safe_response.push_str(vid);
                             }
                         }
 

@@ -270,6 +270,9 @@ pub(crate) const REASONING_CONTENT_SENTINEL: &str = "\x00REASONING\x00";
 /// Sentinel prefix for image data extracted from tool results.
 /// The WS handler collects these and appends them to the final response.
 pub(crate) const IMAGE_DATA_SENTINEL: &str = "\x00IMAGE\x00";
+/// Sentinel prefix for video embed markers extracted from tool results.
+/// The WS handler collects these and appends them to the final response.
+pub(crate) const VIDEO_EMBED_SENTINEL: &str = "\x00VIDEO\x00";
 
 tokio::task_local! {
     static TOOL_LOOP_REPLY_TARGET: Option<String>;
@@ -1957,18 +1960,31 @@ pub(crate) async fn run_tool_call_loop(
         }
 
         for (tool_name, tool_call_id, outcome) in ordered_results.into_iter().flatten() {
-            // Extract [IMAGE:data:image/...] markers from tool output and relay
-            // them through the delta channel so the WS handler can append them
-            // to the final response for inline rendering in the voice UI.
+            // Extract [IMAGE:data:image/...] and [VIDEO_EMBED:...] markers from
+            // tool output and relay them through the delta channel so the WS
+            // handler can append them to the final response for inline rendering
+            // in the voice UI.
             if let Some(ref tx) = on_delta {
                 if outcome.output.contains("[IMAGE:data:image/") {
-                    // Use a simple find/scan to avoid pulling in regex here
                     let mut search_from = 0;
                     while let Some(start) = outcome.output[search_from..].find("[IMAGE:data:image/") {
                         let abs_start = search_from + start;
                         if let Some(end) = outcome.output[abs_start..].find(']') {
                             let marker = &outcome.output[abs_start..abs_start + end + 1];
                             let _ = tx.send(format!("{IMAGE_DATA_SENTINEL}{marker}")).await;
+                            search_from = abs_start + end + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                if outcome.output.contains("[VIDEO_EMBED:") {
+                    let mut search_from = 0;
+                    while let Some(start) = outcome.output[search_from..].find("[VIDEO_EMBED:") {
+                        let abs_start = search_from + start;
+                        if let Some(end) = outcome.output[abs_start..].find(']') {
+                            let marker = &outcome.output[abs_start..abs_start + end + 1];
+                            let _ = tx.send(format!("{VIDEO_EMBED_SENTINEL}{marker}")).await;
                             search_from = abs_start + end + 1;
                         } else {
                             break;
