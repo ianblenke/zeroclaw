@@ -622,10 +622,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                         let _ = ws_writer
                                             .send(Message::Text(thinking_msg.to_string().into()))
                                             .await;
-                                    } else if d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_SENTINEL)
-                                        || d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_BLOCK_SENTINEL)
-                                    {
-                                        // Progress updates (thinking, tool calls) — skip.
+                                    } else if d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_SENTINEL) {
+                                        // Forward progress updates as thinking messages
+                                        let content = &d[crate::agent::loop_::DRAFT_PROGRESS_SENTINEL.len()..];
+                                        let thinking_msg = serde_json::json!({
+                                            "type": "thinking",
+                                            "content": content,
+                                        });
+                                        let _ = ws_writer
+                                            .send(Message::Text(thinking_msg.to_string().into()))
+                                            .await;
+                                    } else if d.starts_with(crate::agent::loop_::DRAFT_PROGRESS_BLOCK_SENTINEL) {
+                                        // Forward progress block updates as thinking messages
+                                        let content = &d[crate::agent::loop_::DRAFT_PROGRESS_BLOCK_SENTINEL.len()..];
+                                        let thinking_msg = serde_json::json!({
+                                            "type": "thinking",
+                                            "content": content,
+                                        });
+                                        let _ = ws_writer
+                                            .send(Message::Text(thinking_msg.to_string().into()))
+                                            .await;
                                     } else if in_final_response {
                                         let chunk_msg = serde_json::json!({
                                             "type": "chunk",
