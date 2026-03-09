@@ -3575,9 +3575,14 @@ pub async fn process_message_with_session(
             tools_registry.len(),
             config.tool_search.threshold,
         );
-        // Build full catalog snapshot for the search tool
-        let full_catalog: Vec<crate::tools::ToolSpec> =
-            tools_registry.iter().map(|t| t.spec()).collect();
+        // Build catalog snapshot for the search tool, excluding non-CLI excluded tools
+        // so the model can't discover tools it's not allowed to call.
+        let excluded_from_search = &config.autonomy.non_cli_excluded_tools;
+        let full_catalog: Vec<crate::tools::ToolSpec> = tools_registry
+            .iter()
+            .filter(|t| !excluded_from_search.iter().any(|ex| ex == t.name()))
+            .map(|t| t.spec())
+            .collect();
         let search_tool = tools::ToolSearchTool::new(
             full_catalog,
             config.tool_search.max_results,
