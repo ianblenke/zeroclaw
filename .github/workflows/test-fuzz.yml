@@ -27,7 +27,7 @@ env:
 jobs:
     fuzz:
         name: Fuzz (${{ matrix.target }})
-        runs-on: [self-hosted, aws-india]
+        runs-on: blacksmith-8vcpu-ubuntu-2404
         timeout-minutes: 60
         strategy:
             fail-fast: false

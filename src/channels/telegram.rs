@@ -15,6 +15,7 @@ use tokio::fs;
 
 /// Telegram's maximum message length for text messages
 const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
+const TELEGRAM_NATIVE_DRAFT_ID: i64 = 1;
 /// Reserve space for continuation markers added by send_text_chunks:
 /// worst case is "(continued)\n\n" + chunk + "\n\n(continues...)" = 30 extra chars
 const TELEGRAM_CONTINUATION_OVERHEAD: usize = 30;
@@ -463,6 +464,7 @@ pub struct TelegramChannel {
     stream_mode: StreamMode,
     draft_update_interval_ms: u64,
     last_draft_edit: Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    native_drafts: Mutex<std::collections::HashSet<String>>,
     mention_only: bool,
     group_reply_allowed_sender_ids: Vec<String>,
     bot_username: Mutex<Option<String>>,
@@ -504,6 +506,7 @@ impl TelegramChannel {
             stream_mode: StreamMode::Off,
             draft_update_interval_ms: 1000,
             last_draft_edit: Mutex::new(std::collections::HashMap::new()),
+            native_drafts: Mutex::new(std::collections::HashSet::new()),
             typing_handle: Mutex::new(None),
             mention_only,
             group_reply_allowed_sender_ids: Vec::new(),
@@ -586,6 +589,151 @@ impl TelegramChannel {
         if let Some(thread_id) = thread_id {
             body["message_thread_id"] = serde_json::Value::String(thread_id);
         }
+        body
+    }
+
+    fn is_private_chat_target(chat_id: &str, thread_id: Option<&str>) -> bool {
+        if thread_id.is_some() {
+            return false;
+        }
+        chat_id.parse::<i64>().is_ok_and(|parsed| parsed > 0)
+    }
+
+    fn native_draft_key(chat_id: &str, draft_id: i64) -> String {
+        format!("{chat_id}:{draft_id}")
+    }
+
+    fn register_native_draft(&self, chat_id: &str, draft_id: i64) {
+        self.native_drafts
+            .lock()
+            .insert(Self::native_draft_key(chat_id, draft_id));
+    }
+
+    fn unregister_native_draft(&self, chat_id: &str, draft_id: i64) -> bool {
+        self.native_drafts
+            .lock()
+            .remove(&Self::native_draft_key(chat_id, draft_id))
+    }
+
+    fn has_native_draft(&self, chat_id: &str, draft_id: i64) -> bool {
+        self.native_drafts
+            .lock()
+            .contains(&Self::native_draft_key(chat_id, draft_id))
+    }
+
+    fn consume_native_draft_finalize(
+        &self,
+        chat_id: &str,
+        thread_id: Option<&str>,
+        message_id: &str,
+    ) -> bool {
+        if self.stream_mode != StreamMode::On || !Self::is_private_chat_target(chat_id, thread_id) {
+            return false;
+        }
+
+        match message_id.parse::<i64>() {
+            Ok(draft_id) if self.unregister_native_draft(chat_id, draft_id) => true,
+            // If the in-memory registry entry is missing, still treat the
+            // known native draft id as native so final content is delivered.
+            Ok(TELEGRAM_NATIVE_DRAFT_ID) => {
+                tracing::warn!(
+                    chat_id = %chat_id,
+                    draft_id = TELEGRAM_NATIVE_DRAFT_ID,
+                    "Telegram native draft registry missing during finalize; sending final content directly"
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    async fn send_message_draft(
+        &self,
+        chat_id: &str,
+        draft_id: i64,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        let markdown_body = serde_json::json!({
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "text": Self::markdown_to_telegram_html(text),
+            "parse_mode": "HTML",
+        });
+
+        let markdown_resp = self
+            .client
+            .post(self.api_url("sendMessageDraft"))
+            .json(&markdown_body)
+            .send()
+            .await?;
+
+        if markdown_resp.status().is_success() {
+            return Ok(());
+        }
+
+        let markdown_status = markdown_resp.status();
+        let markdown_err = markdown_resp.text().await.unwrap_or_default();
+        let plain_body = serde_json::json!({
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "text": text,
+        });
+
+        let plain_resp = self
+            .client
+            .post(self.api_url("sendMessageDraft"))
+            .json(&plain_body)
+            .send()
+            .await?;
+
+        if !plain_resp.status().is_success() {
+            let plain_status = plain_resp.status();
+            let plain_err = plain_resp.text().await.unwrap_or_default();
+            let sanitized_markdown_err = Self::sanitize_telegram_error(&markdown_err);
+            let sanitized_plain_err = Self::sanitize_telegram_error(&plain_err);
+            anyhow::bail!(
+                "Telegram sendMessageDraft failed (markdown {}: {}; plain {}: {})",
+                markdown_status,
+                sanitized_markdown_err,
+                plain_status,
+                sanitized_plain_err
+            );
+        }
+
+        Ok(())
+    }
+
+    fn build_approval_prompt_body(
+        chat_id: &str,
+        thread_id: Option<&str>,
+        request_id: &str,
+        tool_name: &str,
+        args_preview: &str,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": format!(
+                "Approval required for tool `{tool_name}`.\nRequest ID: `{request_id}`\nArgs: `{args_preview}`",
+            ),
+            "parse_mode": "Markdown",
+            "reply_markup": {
+                "inline_keyboard": [[
+                    {
+                        "text": "Approve",
+                        "callback_data": format!("{TELEGRAM_APPROVAL_CALLBACK_APPROVE_PREFIX}{request_id}")
+                    },
+                    {
+                        "text": "Deny",
+                        "callback_data": format!("{TELEGRAM_APPROVAL_CALLBACK_DENY_PREFIX}{request_id}")
+                    }
+                ]]
+            }
+        });
+
+        if let Some(thread_id) = thread_id {
+            body["message_thread_id"] = serde_json::Value::String(thread_id.to_string());
+        }
+
         body
     }
 
@@ -2786,6 +2934,25 @@ impl Channel for TelegramChannel {
             message.content.clone()
         };
 
+        if self.stream_mode == StreamMode::On
+            && Self::is_private_chat_target(&chat_id, thread_id.as_deref())
+        {
+            match self
+                .send_message_draft(&chat_id, TELEGRAM_NATIVE_DRAFT_ID, &initial_text)
+                .await
+            {
+                Ok(()) => {
+                    self.register_native_draft(&chat_id, TELEGRAM_NATIVE_DRAFT_ID);
+                    return Ok(Some(TELEGRAM_NATIVE_DRAFT_ID.to_string()));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "Telegram sendMessageDraft failed; falling back to partial stream mode: {error}"
+                    );
+                }
+            }
+        }
+
         let mut body = serde_json::json!({
             "chat_id": chat_id,
             "text": initial_text,
@@ -2827,18 +2994,7 @@ impl Channel for TelegramChannel {
         message_id: &str,
         text: &str,
     ) -> anyhow::Result<Option<String>> {
-        let (chat_id, _) = Self::parse_reply_target(recipient);
-
-        // Rate-limit edits per chat
-        {
-            let last_edits = self.last_draft_edit.lock();
-            if let Some(last_time) = last_edits.get(&chat_id) {
-                let elapsed = u64::try_from(last_time.elapsed().as_millis()).unwrap_or(u64::MAX);
-                if elapsed < self.draft_update_interval_ms {
-                    return Ok(None);
-                }
-            }
-        }
+        let (chat_id, thread_id) = Self::parse_reply_target(recipient);
 
         // Truncate to Telegram limit for mid-stream edits (UTF-8 safe)
         let display_text = if text.len() > TELEGRAM_MAX_MESSAGE_LENGTH {
@@ -2854,6 +3010,41 @@ impl Channel for TelegramChannel {
         } else {
             text
         };
+
+        if self.stream_mode == StreamMode::On
+            && Self::is_private_chat_target(&chat_id, thread_id.as_deref())
+        {
+            let parsed_draft_id = message_id
+                .parse::<i64>()
+                .unwrap_or(TELEGRAM_NATIVE_DRAFT_ID);
+            if self.has_native_draft(&chat_id, parsed_draft_id) {
+                if let Err(error) = self
+                    .send_message_draft(&chat_id, parsed_draft_id, display_text)
+                    .await
+                {
+                    tracing::warn!(
+                        chat_id = %chat_id,
+                        draft_id = parsed_draft_id,
+                        "Telegram sendMessageDraft update failed: {error}"
+                    );
+                    return Err(error).context(format!(
+                        "Telegram sendMessageDraft update failed for chat {chat_id} draft_id {parsed_draft_id}"
+                    ));
+                }
+                return Ok(None);
+            }
+        }
+
+        // Rate-limit edits per chat
+        {
+            let last_edits = self.last_draft_edit.lock();
+            if let Some(last_time) = last_edits.get(&chat_id) {
+                let elapsed = u64::try_from(last_time.elapsed().as_millis()).unwrap_or(u64::MAX);
+                if elapsed < self.draft_update_interval_ms {
+                    return Ok(None);
+                }
+            }
+        }
 
         let message_id_parsed = match message_id.parse::<i64>() {
             Ok(id) => id,
@@ -2902,8 +3093,25 @@ impl Channel for TelegramChannel {
         // Clean up rate-limit tracking for this chat
         self.last_draft_edit.lock().remove(&chat_id);
 
+        let is_native_draft =
+            self.consume_native_draft_finalize(&chat_id, thread_id.as_deref(), message_id);
+
         // Parse attachments before processing
         let (text_without_markers, attachments) = parse_attachment_markers(text);
+
+        if is_native_draft {
+            if !text_without_markers.is_empty() {
+                self.send_text_chunks(&text_without_markers, &chat_id, thread_id.as_deref())
+                    .await?;
+            }
+
+            for attachment in &attachments {
+                self.send_attachment(&chat_id, thread_id.as_deref(), attachment)
+                    .await?;
+            }
+
+            return Ok(());
+        }
 
         // Parse message ID once for reuse
         let msg_id = match message_id.parse::<i64>() {
@@ -3070,8 +3278,18 @@ impl Channel for TelegramChannel {
     }
 
     async fn cancel_draft(&self, recipient: &str, message_id: &str) -> anyhow::Result<()> {
-        let (chat_id, _) = Self::parse_reply_target(recipient);
+        let (chat_id, thread_id) = Self::parse_reply_target(recipient);
         self.last_draft_edit.lock().remove(&chat_id);
+
+        if self.stream_mode == StreamMode::On
+            && Self::is_private_chat_target(&chat_id, thread_id.as_deref())
+        {
+            if let Ok(draft_id) = message_id.parse::<i64>() {
+                if self.unregister_native_draft(&chat_id, draft_id) {
+                    return Ok(());
+                }
+            }
+        }
 
         let message_id = match message_id.parse::<i64>() {
             Ok(id) => id,
@@ -3153,28 +3371,13 @@ impl Channel for TelegramChannel {
             raw_args
         };
 
-        let mut body = serde_json::json!({
-            "chat_id": chat_id,
-            "text": format!(
-                "Approval required for tool `{tool_name}`.\nRequest ID: `{request_id}`\nArgs: `{args_preview}`",
-            ),
-            "reply_markup": {
-                "inline_keyboard": [[
-                    {
-                        "text": "Approve",
-                        "callback_data": format!("{TELEGRAM_APPROVAL_CALLBACK_APPROVE_PREFIX}{request_id}")
-                    },
-                    {
-                        "text": "Deny",
-                        "callback_data": format!("{TELEGRAM_APPROVAL_CALLBACK_DENY_PREFIX}{request_id}")
-                    }
-                ]]
-            }
-        });
-
-        if let Some(thread_id) = thread_id {
-            body["message_thread_id"] = serde_json::Value::String(thread_id);
-        }
+        let body = Self::build_approval_prompt_body(
+            &chat_id,
+            thread_id.as_deref(),
+            request_id,
+            tool_name,
+            &args_preview,
+        );
 
         let response = self
             .http_client()
@@ -3584,6 +3787,30 @@ mod tests {
             .with_streaming(StreamMode::Partial, 750);
         assert!(partial.supports_draft_updates());
         assert_eq!(partial.draft_update_interval_ms, 750);
+
+        let on = TelegramChannel::new("fake-token".into(), vec!["*".into()], false, true)
+            .with_streaming(StreamMode::On, 750);
+        assert!(on.supports_draft_updates());
+    }
+
+    #[test]
+    fn private_chat_detection_excludes_threads_and_negative_chat_ids() {
+        assert!(TelegramChannel::is_private_chat_target("12345", None));
+        assert!(!TelegramChannel::is_private_chat_target("-100200300", None));
+        assert!(!TelegramChannel::is_private_chat_target(
+            "12345",
+            Some("789")
+        ));
+    }
+
+    #[test]
+    fn native_draft_registry_round_trip() {
+        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false, true);
+        assert!(!ch.has_native_draft("12345", TELEGRAM_NATIVE_DRAFT_ID));
+        ch.register_native_draft("12345", TELEGRAM_NATIVE_DRAFT_ID);
+        assert!(ch.has_native_draft("12345", TELEGRAM_NATIVE_DRAFT_ID));
+        assert!(ch.unregister_native_draft("12345", TELEGRAM_NATIVE_DRAFT_ID));
+        assert!(!ch.has_native_draft("12345", TELEGRAM_NATIVE_DRAFT_ID));
     }
 
     #[tokio::test]
@@ -3623,6 +3850,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_draft_native_failure_propagates_error() {
+        let ch = TelegramChannel::new("TEST_TOKEN".into(), vec!["*".into()], false, true)
+            .with_streaming(StreamMode::On, 0)
+            // Closed local port guarantees fast, deterministic connection failure.
+            .with_api_base("http://127.0.0.1:9".to_string());
+        ch.register_native_draft("12345", TELEGRAM_NATIVE_DRAFT_ID);
+
+        let err = ch
+            .update_draft("12345", "1", "stream update")
+            .await
+            .expect_err("native sendMessageDraft failure should propagate")
+            .to_string();
+        assert!(err.contains("sendMessageDraft update failed"));
+        assert!(ch.has_native_draft("12345", TELEGRAM_NATIVE_DRAFT_ID));
+    }
+
+    #[tokio::test]
+    async fn finalize_draft_missing_native_registry_empty_text_succeeds() {
+        let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false, true)
+            .with_streaming(StreamMode::On, 0)
+            .with_api_base("http://127.0.0.1:9".to_string());
+
+        assert!(!ch.has_native_draft("12345", TELEGRAM_NATIVE_DRAFT_ID));
+        let result = ch.finalize_draft("12345", "1", "").await;
+        assert!(
+            result.is_ok(),
+            "native finalize fallback should no-op: {result:?}"
+        );
+        assert!(!ch.has_native_draft("12345", TELEGRAM_NATIVE_DRAFT_ID));
+    }
+
+    #[tokio::test]
     async fn finalize_draft_invalid_message_id_falls_back_to_chunk_send() {
         let ch = TelegramChannel::new("fake-token".into(), vec!["*".into()], false, true)
             .with_streaming(StreamMode::Partial, 0);
@@ -3652,6 +3911,24 @@ mod tests {
             ch.api_url("sendMessage"),
             "https://tapi.bale.ai/bot123:ABC/sendMessage"
         );
+    }
+
+    #[test]
+    fn approval_prompt_includes_markdown_parse_mode() {
+        let body = TelegramChannel::build_approval_prompt_body(
+            "12345",
+            Some("67890"),
+            "apr-1234",
+            "shell",
+            "{\"command\":\"echo hello\"}",
+        );
+
+        assert_eq!(body["parse_mode"], "Markdown");
+        assert_eq!(body["chat_id"], "12345");
+        assert_eq!(body["message_thread_id"], "67890");
+        assert!(body["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("`shell`")));
     }
 
     #[test]

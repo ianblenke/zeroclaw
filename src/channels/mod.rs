@@ -251,6 +251,14 @@ struct ChannelRuntimeDefaults {
     api_url: Option<String>,
     reliability: crate::config::ReliabilityConfig,
     cost: crate::config::CostConfig,
+    auto_save_memory: bool,
+    max_tool_iterations: usize,
+    min_relevance_score: f64,
+    message_timeout_secs: u64,
+    interrupt_on_new_message: bool,
+    multimodal: crate::config::MultimodalConfig,
+    query_classification: crate::config::QueryClassificationConfig,
+    model_routes: Vec<crate::config::ModelRouteConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,10 +268,30 @@ struct ConfigFileStamp {
 }
 
 #[derive(Debug, Clone)]
+struct RuntimeSemanticGuardState {
+    enabled: bool,
+    collection: String,
+    threshold: f64,
+}
+
+impl Default for RuntimeSemanticGuardState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            collection: "semantic_guard".to_string(),
+            threshold: 0.82,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct RuntimeConfigState {
     defaults: ChannelRuntimeDefaults,
     perplexity_filter: crate::config::PerplexityFilterConfig,
     outbound_leak_guard: crate::config::OutboundLeakGuardConfig,
+    canary_tokens: bool,
+    semantic_guard: RuntimeSemanticGuardState,
+    memory_config: crate::config::MemoryConfig,
     last_applied_stamp: Option<ConfigFileStamp>,
 }
 
@@ -271,6 +299,7 @@ struct RuntimeConfigState {
 struct RuntimeAutonomyPolicy {
     auto_approve: Vec<String>,
     always_ask: Vec<String>,
+    command_context_rules: Vec<crate::config::CommandContextRuleConfig>,
     non_cli_excluded_tools: Vec<String>,
     non_cli_approval_approvers: Vec<String>,
     non_cli_natural_language_approval_mode: NonCliNaturalLanguageApprovalMode,
@@ -278,6 +307,9 @@ struct RuntimeAutonomyPolicy {
         HashMap<String, NonCliNaturalLanguageApprovalMode>,
     perplexity_filter: crate::config::PerplexityFilterConfig,
     outbound_leak_guard: crate::config::OutboundLeakGuardConfig,
+    canary_tokens: bool,
+    semantic_guard: RuntimeSemanticGuardState,
+    memory_config: crate::config::MemoryConfig,
 }
 
 fn runtime_config_store() -> &'static Mutex<HashMap<PathBuf, RuntimeConfigState>> {
@@ -390,6 +422,38 @@ fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
 
 fn interruption_scope_key(msg: &traits::ChannelMessage) -> String {
     format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender)
+}
+
+fn should_prefix_sender_identity(msg: &traits::ChannelMessage) -> bool {
+    if msg.channel != "telegram" {
+        return false;
+    }
+
+    let chat_id = msg
+        .reply_target
+        .split_once(':')
+        .map_or(msg.reply_target.as_str(), |(chat_id, _)| chat_id);
+
+    // Telegram supergroups/groups use negative chat IDs.
+    chat_id.starts_with('-')
+}
+
+fn llm_user_content_with_sender_identity(msg: &traits::ChannelMessage, content: &str) -> String {
+    if !should_prefix_sender_identity(msg) {
+        return content.to_string();
+    }
+
+    let sender = msg.sender.trim();
+    if sender.is_empty() {
+        return content.to_string();
+    }
+
+    let prefix = format!("[sender: {sender}]");
+    if content.trim_start().starts_with(prefix.as_str()) {
+        return content.to_string();
+    }
+
+    format!("{prefix} {content}")
 }
 
 /// Strip tool-call XML tags from outgoing messages.
@@ -533,6 +597,24 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
              - The path MUST be an absolute filesystem path to a local file (e.g. [IMAGE:/home/nicolas/.zeroclaw/workspace/images/chart.png]).\n\
              - Keep normal text outside markers and never wrap markers in code fences.\n\
              - You can combine text and media in one response — text is sent first, then each attachment.\n\
+             - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
+        ),
+        "lark" | "feishu" => Some(
+            "When responding on Lark/Feishu:\n\
+             - For image attachments, use markers: [IMAGE:<path-or-url-or-data-uri>]\n\
+             - Keep normal text outside markers and never wrap markers in code fences.\n\
+             - Prefer one marker per line to keep delivery deterministic.\n\
+             - If you include both text and images, put text first, then image markers.\n\
+             - Be concise and direct. Skip filler phrases.\n\
+             - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
+        ),
+        "qq" => Some(
+            "When responding on QQ:\n\
+             - For image attachments, use markers: [IMAGE:<path-or-url-or-data-uri>]\n\
+             - Keep normal text outside markers and never wrap markers in code fences.\n\
+             - Prefer one marker per line to keep delivery deterministic.\n\
+             - If you include both text and images, put text first, then image markers.\n\
+             - Be concise and direct. Skip filler phrases.\n\
              - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
         ),
         "bluebubbles" => Some(
@@ -753,6 +835,7 @@ fn build_channel_system_prompt(
     expose_internal_tool_details: bool,
 ) -> String {
     let mut prompt = base_prompt.to_string();
+    crate::agent::prompt::refresh_prompt_datetime(&mut prompt);
 
     if let Some(instructions) = channel_delivery_instructions(channel_name) {
         if prompt.is_empty() {
@@ -1048,6 +1131,14 @@ fn resolved_default_model(config: &Config) -> String {
 }
 
 fn runtime_defaults_from_config(config: &Config) -> ChannelRuntimeDefaults {
+    let message_timeout_secs =
+        effective_channel_message_timeout_secs(config.channels_config.message_timeout_secs);
+    let interrupt_on_new_message = config
+        .channels_config
+        .telegram
+        .as_ref()
+        .is_some_and(|tg| tg.interrupt_on_new_message);
+
     ChannelRuntimeDefaults {
         default_provider: resolved_default_provider(config),
         model: resolved_default_model(config),
@@ -1056,6 +1147,22 @@ fn runtime_defaults_from_config(config: &Config) -> ChannelRuntimeDefaults {
         api_url: config.api_url.clone(),
         reliability: config.reliability.clone(),
         cost: config.cost.clone(),
+        auto_save_memory: config.memory.auto_save,
+        max_tool_iterations: config.agent.max_tool_iterations,
+        min_relevance_score: config.memory.min_relevance_score,
+        message_timeout_secs,
+        interrupt_on_new_message,
+        multimodal: config.multimodal.clone(),
+        query_classification: config.query_classification.clone(),
+        model_routes: config.model_routes.clone(),
+    }
+}
+
+fn runtime_semantic_guard_from_config(config: &Config) -> RuntimeSemanticGuardState {
+    RuntimeSemanticGuardState {
+        enabled: config.security.semantic_guard,
+        collection: config.security.semantic_guard_collection.clone(),
+        threshold: config.security.semantic_guard_threshold,
     }
 }
 
@@ -1063,6 +1170,7 @@ fn runtime_autonomy_policy_from_config(config: &Config) -> RuntimeAutonomyPolicy
     RuntimeAutonomyPolicy {
         auto_approve: config.autonomy.auto_approve.clone(),
         always_ask: config.autonomy.always_ask.clone(),
+        command_context_rules: config.autonomy.command_context_rules.clone(),
         non_cli_excluded_tools: config.autonomy.non_cli_excluded_tools.clone(),
         non_cli_approval_approvers: config.autonomy.non_cli_approval_approvers.clone(),
         non_cli_natural_language_approval_mode: config
@@ -1074,6 +1182,9 @@ fn runtime_autonomy_policy_from_config(config: &Config) -> RuntimeAutonomyPolicy
             .clone(),
         perplexity_filter: config.security.perplexity_filter.clone(),
         outbound_leak_guard: config.security.outbound_leak_guard.clone(),
+        canary_tokens: config.security.canary_tokens,
+        semantic_guard: runtime_semantic_guard_from_config(config),
+        memory_config: config.memory.clone(),
     }
 }
 
@@ -1102,6 +1213,14 @@ fn runtime_defaults_snapshot(ctx: &ChannelRuntimeContext) -> ChannelRuntimeDefau
         api_url: ctx.api_url.clone(),
         reliability: (*ctx.reliability).clone(),
         cost: crate::config::CostConfig::default(),
+        auto_save_memory: ctx.auto_save_memory,
+        max_tool_iterations: ctx.max_tool_iterations,
+        min_relevance_score: ctx.min_relevance_score,
+        message_timeout_secs: ctx.message_timeout_secs,
+        interrupt_on_new_message: ctx.interrupt_on_new_message,
+        multimodal: ctx.multimodal.clone(),
+        query_classification: ctx.query_classification.clone(),
+        model_routes: ctx.model_routes.clone(),
     }
 }
 
@@ -1136,6 +1255,82 @@ fn runtime_outbound_leak_guard_snapshot(
     }
     crate::config::OutboundLeakGuardConfig::default()
 }
+
+fn runtime_canary_tokens_snapshot(ctx: &ChannelRuntimeContext) -> bool {
+    if let Some(config_path) = runtime_config_path(ctx) {
+        let store = runtime_config_store()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = store.get(&config_path) {
+            return state.canary_tokens;
+        }
+    }
+    false
+}
+
+fn runtime_semantic_guard_snapshot(ctx: &ChannelRuntimeContext) -> RuntimeSemanticGuardState {
+    if let Some(config_path) = runtime_config_path(ctx) {
+        let store = runtime_config_store()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = store.get(&config_path) {
+            return state.semantic_guard.clone();
+        }
+    }
+    RuntimeSemanticGuardState::default()
+}
+
+fn runtime_memory_config_snapshot(ctx: &ChannelRuntimeContext) -> crate::config::MemoryConfig {
+    if let Some(config_path) = runtime_config_path(ctx) {
+        let store = runtime_config_store()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = store.get(&config_path) {
+            return state.memory_config.clone();
+        }
+    }
+    crate::config::MemoryConfig::default()
+}
+
+fn maybe_log_semantic_guard_startup_status(
+    source: &str,
+    memory: &crate::config::MemoryConfig,
+    semantic_guard: &RuntimeSemanticGuardState,
+    embedding_api_key: Option<&str>,
+) {
+    let guard = crate::security::SemanticGuard::from_config(
+        memory,
+        semantic_guard.enabled,
+        semantic_guard.collection.as_str(),
+        semantic_guard.threshold,
+        embedding_api_key,
+    );
+    let status = guard.startup_status();
+
+    if !semantic_guard.enabled {
+        tracing::debug!(source, "Semantic guard is disabled in config");
+        return;
+    }
+
+    if status.active {
+        tracing::info!(
+            source,
+            collection = %semantic_guard.collection,
+            threshold = semantic_guard.threshold,
+            "Semantic prompt-injection guard is active"
+        );
+        return;
+    }
+
+    tracing::info!(
+        source,
+        collection = %semantic_guard.collection,
+        threshold = semantic_guard.threshold,
+        reason = %status.reason.as_deref().unwrap_or("unknown"),
+        "Semantic prompt-injection guard configured but inactive; running lexical-only prompt guard"
+    );
+}
+
 fn snapshot_non_cli_excluded_tools(ctx: &ChannelRuntimeContext) -> Vec<String> {
     ctx.non_cli_excluded_tools
         .lock()
@@ -1662,14 +1857,25 @@ async fn maybe_apply_runtime_config_update(ctx: &ChannelRuntimeContext) -> Resul
                 defaults: next_defaults.clone(),
                 perplexity_filter: next_autonomy_policy.perplexity_filter.clone(),
                 outbound_leak_guard: next_autonomy_policy.outbound_leak_guard.clone(),
+                canary_tokens: next_autonomy_policy.canary_tokens,
+                semantic_guard: next_autonomy_policy.semantic_guard.clone(),
+                memory_config: next_autonomy_policy.memory_config.clone(),
                 last_applied_stamp: Some(stamp),
             },
         );
     }
 
+    maybe_log_semantic_guard_startup_status(
+        "runtime-reload",
+        &next_autonomy_policy.memory_config,
+        &next_autonomy_policy.semantic_guard,
+        next_defaults.api_key.as_deref(),
+    );
+
     ctx.approval_manager.replace_runtime_non_cli_policy(
         &next_autonomy_policy.auto_approve,
         &next_autonomy_policy.always_ask,
+        &next_autonomy_policy.command_context_rules,
         &next_autonomy_policy.non_cli_approval_approvers,
         next_autonomy_policy.non_cli_natural_language_approval_mode,
         &next_autonomy_policy.non_cli_natural_language_approval_mode_by_channel,
@@ -1696,6 +1902,11 @@ async fn maybe_apply_runtime_config_update(ctx: &ChannelRuntimeContext) -> Resul
         outbound_leak_guard_enabled = next_autonomy_policy.outbound_leak_guard.enabled,
         outbound_leak_guard_action = ?next_autonomy_policy.outbound_leak_guard.action,
         outbound_leak_guard_sensitivity = next_autonomy_policy.outbound_leak_guard.sensitivity,
+        canary_tokens = next_autonomy_policy.canary_tokens,
+        semantic_guard_enabled = next_autonomy_policy.semantic_guard.enabled,
+        semantic_guard_collection = %next_autonomy_policy.semantic_guard.collection,
+        semantic_guard_threshold = next_autonomy_policy.semantic_guard.threshold,
+        memory_backend = %next_autonomy_policy.memory_config.backend,
         "Applied updated channel runtime config from disk"
     );
 
@@ -1722,14 +1933,14 @@ fn get_route_selection(ctx: &ChannelRuntimeContext, sender_key: &str) -> Channel
 /// Classify a user message and return the appropriate route selection with logging.
 /// Returns None if classification is disabled or no rules match.
 fn classify_message_route(
-    ctx: &ChannelRuntimeContext,
+    query_classification: &crate::config::QueryClassificationConfig,
+    model_routes: &[crate::config::ModelRouteConfig],
     message: &str,
 ) -> Option<ChannelRouteSelection> {
-    let decision =
-        crate::agent::classifier::classify_with_decision(&ctx.query_classification, message)?;
+    let decision = crate::agent::classifier::classify_with_decision(query_classification, message)?;
 
     // Find the matching model route
-    let route = ctx.model_routes.iter().find(|r| r.hint == decision.hint)?;
+    let route = model_routes.iter().find(|r| r.hint == decision.hint)?;
 
     tracing::info!(
         target: "query_classification",
@@ -1956,9 +2167,9 @@ async fn get_or_create_provider(
 
     let provider = create_resilient_provider_nonblocking(
         provider_name,
-        ctx.api_key.clone(),
+        defaults.api_key.clone(),
         api_url.map(ToString::to_string),
-        ctx.reliability.as_ref().clone(),
+        defaults.reliability.clone(),
         ctx.provider_runtime_options.clone(),
     )
     .await?;
@@ -1994,6 +2205,31 @@ async fn create_resilient_provider_nonblocking(
     })
     .await
     .context("failed to join provider initialization task")?
+}
+
+async fn create_routed_provider_nonblocking(
+    provider_name: &str,
+    api_key: Option<String>,
+    api_url: Option<String>,
+    reliability: crate::config::ReliabilityConfig,
+    model_routes: Vec<crate::config::ModelRouteConfig>,
+    default_model: String,
+    provider_runtime_options: providers::ProviderRuntimeOptions,
+) -> anyhow::Result<Box<dyn Provider>> {
+    let provider_name = provider_name.to_string();
+    tokio::task::spawn_blocking(move || {
+        providers::create_routed_provider_with_options(
+            &provider_name,
+            api_key.as_deref(),
+            api_url.as_deref(),
+            &reliability,
+            &model_routes,
+            &default_model,
+            &provider_runtime_options,
+        )
+    })
+    .await
+    .context("failed to join routed provider initialization task")?
 }
 
 fn build_models_help_response(current: &ChannelRouteSelection, workspace_dir: &Path) -> String {
@@ -3344,7 +3580,42 @@ async fn process_channel_message(
     if handle_runtime_command_if_needed(ctx.as_ref(), &msg, target_channel.as_ref()).await {
         return;
     }
+    let runtime_defaults = runtime_defaults_snapshot(ctx.as_ref());
     if !msg.content.trim_start().starts_with('/') {
+        let prompt_guard =
+            crate::security::PromptGuard::with_config(crate::security::GuardAction::Block, 0.8);
+        if let crate::security::GuardResult::Blocked(reason) = prompt_guard.scan(&msg.content) {
+            runtime_trace::record_event(
+                "channel_message_blocked_prompt_guard",
+                Some(msg.channel.as_str()),
+                None,
+                None,
+                None,
+                Some(false),
+                Some("blocked by lexical prompt-injection guard"),
+                serde_json::json!({
+                    "sender": msg.sender,
+                    "message_id": msg.id,
+                    "mode": "lexical",
+                    "reason": reason.as_str(),
+                }),
+            );
+            if let Some(channel) = target_channel.as_ref() {
+                let warning = format!(
+                    "Request blocked by `security.prompt_guard` before provider execution.\n\
+reason: {reason}\n\
+If this input is legitimate, rephrase without instruction-overrides, system-prompt extraction, or credential exfiltration requests."
+                );
+                let _ = channel
+                    .send(
+                        &SendMessage::new(warning, &msg.reply_target)
+                            .in_thread(msg.thread_ts.clone()),
+                    )
+                    .await;
+            }
+            return;
+        }
+
         let perplexity_cfg = runtime_perplexity_filter_snapshot(ctx.as_ref());
         if let Some(assessment) =
             crate::security::detect_adversarial_suffix(&msg.content, &perplexity_cfg)
@@ -3378,6 +3649,77 @@ or tune thresholds in config.",
                     assessment.symbol_ratio,
                     perplexity_cfg.symbol_ratio_threshold,
                     assessment.suspicious_token_count
+                );
+                let _ = channel
+                    .send(
+                        &SendMessage::new(warning, &msg.reply_target)
+                            .in_thread(msg.thread_ts.clone()),
+                    )
+                    .await;
+            }
+            return;
+        }
+
+        let semantic_cfg = runtime_semantic_guard_snapshot(ctx.as_ref());
+        let semantic_match = if semantic_cfg.enabled {
+            let memory_cfg = runtime_memory_config_snapshot(ctx.as_ref());
+            let semantic_guard = crate::security::SemanticGuard::from_config(
+                &memory_cfg,
+                semantic_cfg.enabled,
+                semantic_cfg.collection.as_str(),
+                semantic_cfg.threshold,
+                runtime_defaults.api_key.as_deref(),
+            );
+            semantic_guard.detect(&msg.content).await
+        } else {
+            None
+        };
+        let guard_result = prompt_guard.scan_with_semantic_signal(
+            &msg.content,
+            semantic_match
+                .as_ref()
+                .map(|detection| ("semantic_similarity_prompt_injection", detection.score)),
+        );
+        if let crate::security::GuardResult::Blocked(reason) = guard_result {
+            runtime_trace::record_event(
+                "channel_message_blocked_prompt_guard",
+                Some(msg.channel.as_str()),
+                None,
+                None,
+                None,
+                Some(false),
+                Some("blocked by prompt-injection guard with semantic signal"),
+                serde_json::json!({
+                    "sender": msg.sender,
+                    "message_id": msg.id,
+                    "mode": if semantic_match.is_some() { "semantic" } else { "lexical" },
+                    "reason": reason.as_str(),
+                    "semantic": semantic_match.as_ref().map(|detection| serde_json::json!({
+                        "score": detection.score,
+                        "threshold": semantic_cfg.threshold,
+                        "collection": semantic_cfg.collection.as_str(),
+                        "category": detection.category.as_str(),
+                        "key": detection.key.as_str(),
+                    })),
+                }),
+            );
+            if let Some(channel) = target_channel.as_ref() {
+                let semantic_suffix = semantic_match
+                    .as_ref()
+                    .map(|detection| {
+                        format!(
+                            "\nsemantic_match={:.2} (threshold {:.2}), category={}, collection={}.",
+                            detection.score,
+                            semantic_cfg.threshold,
+                            detection.category,
+                            semantic_cfg.collection
+                        )
+                    })
+                    .unwrap_or_default();
+                let warning = format!(
+                    "Request blocked by `security.prompt_guard` before provider execution.\n\
+reason: {reason}{semantic_suffix}\n\
+If this input is legitimate, rephrase the request and avoid instruction-override framing."
                 );
                 let _ = channel
                     .send(
@@ -3446,10 +3788,13 @@ or tune thresholds in config.",
             }
         }
     }
-    // Try classification first, fall back to sender/default route
-    let route = classify_message_route(ctx.as_ref(), &msg.content)
-        .unwrap_or_else(|| get_route_selection(ctx.as_ref(), &history_key));
-    let runtime_defaults = runtime_defaults_snapshot(ctx.as_ref());
+    // Try classification first, fall back to sender/default route.
+    let route = classify_message_route(
+        &runtime_defaults.query_classification,
+        &runtime_defaults.model_routes,
+        &msg.content,
+    )
+    .unwrap_or_else(|| get_route_selection(ctx.as_ref(), &history_key));
     let active_provider = match get_or_create_provider(ctx.as_ref(), &route.provider).await {
         Ok(provider) => provider,
         Err(err) => {
@@ -3469,7 +3814,9 @@ or tune thresholds in config.",
             return;
         }
     };
-    if ctx.auto_save_memory && msg.content.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS {
+    if runtime_defaults.auto_save_memory
+        && msg.content.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS
+    {
         let autosave_key = conversation_memory_key(&msg);
         let _ = ctx
             .memory
@@ -3495,7 +3842,8 @@ or tune thresholds in config.",
     // Inject per-message timestamp so the LLM always knows the current time,
     // even in multi-turn conversations where the system prompt may be stale.
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-    let timestamped_content = format!("[{now}] {}", msg.content);
+    let llm_user_content = llm_user_content_with_sender_identity(&msg, &msg.content);
+    let timestamped_content = format!("[{now}] {llm_user_content}");
     let persisted_user_content = msg.content.clone();
 
     // Preserve user turn before the LLM call so interrupted requests keep context.
@@ -3532,7 +3880,7 @@ or tune thresholds in config.",
                 let memory_context = build_memory_context(
                     ctx.memory.as_ref(),
                     &msg.content,
-                    ctx.min_relevance_score,
+                    runtime_defaults.min_relevance_score,
                     Some(&history_key),
                 )
                 .await;
@@ -3686,8 +4034,10 @@ or tune thresholds in config.",
         Cancelled,
     }
 
-    let timeout_budget_secs =
-        channel_message_timeout_budget_secs(ctx.message_timeout_secs, ctx.max_tool_iterations);
+    let timeout_budget_secs = channel_message_timeout_budget_secs(
+        runtime_defaults.message_timeout_secs,
+        runtime_defaults.max_tool_iterations,
+    );
     let cost_enforcement_context = crate::agent::loop_::create_cost_enforcement_context(
         &runtime_defaults.cost,
         ctx.workspace_dir.as_path(),
@@ -3751,14 +4101,15 @@ or tune thresholds in config.",
                     Some(ctx.approval_manager.as_ref()),
                     msg.channel.as_str(),
                     non_cli_approval_context,
-                    &ctx.multimodal,
-                    ctx.max_tool_iterations,
+                    &runtime_defaults.multimodal,
+                    runtime_defaults.max_tool_iterations,
                     Some(cancellation_token.clone()),
                     delta_tx,
                     ctx.hooks.as_deref(),
                     &excluded_tools_snapshot,
                     progress_mode,
                     ctx.safety_heartbeat.clone(),
+                    runtime_canary_tokens_snapshot(ctx.as_ref()),
                 ),
             ),
         ) => LlmExecutionResult::Completed(result),
@@ -3931,7 +4282,7 @@ or tune thresholds in config.",
                 &history_key,
                 ChatMessage::assistant(&history_response),
             );
-            if ctx.auto_save_memory
+            if runtime_defaults.auto_save_memory
                 && delivered_response.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS
             {
                 let assistant_key = assistant_memory_key(&msg);
@@ -4044,7 +4395,7 @@ or tune thresholds in config.",
                     }
                 }
             } else if is_tool_iteration_limit_error(&e) {
-                let limit = ctx.max_tool_iterations.max(1);
+                let limit = runtime_defaults.max_tool_iterations.max(1);
                 let pause_text = format!(
                     "⚠️ Reached tool-iteration limit ({limit}) for this turn. Context and progress were preserved. Reply \"continue\" to resume, or increase `agent.max_tool_iterations`."
                 );
@@ -4140,7 +4491,9 @@ or tune thresholds in config.",
         LlmExecutionResult::Completed(Err(_)) => {
             let timeout_msg = format!(
                 "LLM response timed out after {}s (base={}s, max_tool_iterations={})",
-                timeout_budget_secs, ctx.message_timeout_secs, ctx.max_tool_iterations
+                timeout_budget_secs,
+                runtime_defaults.message_timeout_secs,
+                runtime_defaults.max_tool_iterations
             );
             runtime_trace::record_event(
                 "channel_message_timeout",
@@ -4221,8 +4574,9 @@ async fn run_message_dispatch_loop(
         let task_sequence = Arc::clone(&task_sequence);
         workers.spawn(async move {
             let _permit = permit;
+            let runtime_defaults = runtime_defaults_snapshot(worker_ctx.as_ref());
             let interrupt_enabled =
-                worker_ctx.interrupt_on_new_message && msg.channel == "telegram";
+                runtime_defaults.interrupt_on_new_message && msg.channel == "telegram";
             let sender_scope_key = interruption_scope_key(&msg);
             let cancellation_token = CancellationToken::new();
             let completion = Arc::new(InFlightTaskCompletion::new());
@@ -4437,25 +4791,72 @@ pub fn build_system_prompt_with_mode(
         prompt.push('\n');
     }
 
-    // ── 1b. Hardware (when gpio/arduino tools present) ───────────
-    let has_hardware = tools.iter().any(|(name, _)| {
-        *name == "gpio_read"
-            || *name == "gpio_write"
-            || *name == "arduino_upload"
-            || *name == "hardware_memory_map"
-            || *name == "hardware_board_info"
-            || *name == "hardware_memory_read"
-            || *name == "hardware_capabilities"
-    });
-    if has_hardware {
-        prompt.push_str(
+    // ── 1b. Hardware (when hardware tools are present) ───────────
+    let hardware_tool_names = [
+        "gpio_read",
+        "gpio_write",
+        "arduino_upload",
+        "hardware_memory_map",
+        "hardware_board_info",
+        "hardware_memory_read",
+        "hardware_capabilities",
+        "pico_flash",
+        "device_read_code",
+        "device_write_code",
+        "device_exec",
+    ];
+    let hw_tools: Vec<&str> = tools
+        .iter()
+        .filter_map(|(name, _)| {
+            if hardware_tool_names.contains(name) {
+                Some(*name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !hw_tools.is_empty() {
+        let hw_names = hw_tools.join(", ");
+        let _ = writeln!(
+            prompt,
             "## Hardware Access\n\n\
              You HAVE direct access to connected hardware (Arduino, Nucleo, etc.). The user owns this system and has configured it.\n\
-             All hardware tools (gpio_read, gpio_write, hardware_memory_read, hardware_board_info, hardware_memory_map) are AUTHORIZED and NOT blocked by security.\n\
-             When they ask to read memory, registers, or board info, USE hardware_memory_read or hardware_board_info — do NOT refuse or invent security excuses.\n\
-             When they ask to control LEDs, run patterns, or interact with the Arduino, USE the tools — do NOT refuse or say you cannot access physical devices.\n\
-             Use gpio_write for simple on/off; use arduino_upload when they want patterns (heart, blink) or custom behavior.\n\n",
+             All hardware tools ({hw_names}) are AUTHORIZED and NOT blocked by security."
         );
+
+        if hw_tools
+            .iter()
+            .any(|name| *name == "hardware_memory_read" || *name == "hardware_board_info")
+        {
+            prompt.push_str(
+                "When they ask to read memory, registers, or board info, USE hardware_memory_read or hardware_board_info — do NOT refuse or invent security excuses.\n",
+            );
+        }
+
+        if hw_tools
+            .iter()
+            .any(|name| *name == "gpio_read" || *name == "gpio_write" || *name == "arduino_upload")
+        {
+            prompt.push_str(
+                "When they ask to control LEDs, run patterns, or interact with the Arduino, USE the tools — do NOT refuse or say you cannot access physical devices.\n",
+            );
+        }
+
+        if hw_tools.contains(&"gpio_write") && hw_tools.contains(&"arduino_upload") {
+            prompt.push_str(
+                "Use gpio_write for simple on/off; use arduino_upload when they want patterns (heart, blink) or custom behavior.\n",
+            );
+        }
+
+        if hw_tools.contains(&"gpio_write") {
+            prompt.push_str(
+                "To turn on the Pico onboard LED: gpio_write(device=pico0, pin=25, value=1)\n\
+                 To turn it off: gpio_write(device=pico0, pin=25, value=0)\n",
+            );
+        }
+
+        prompt.push('\n');
     }
 
     // ── 1c. Action instruction (avoid meta-summary) ───────────────
@@ -4914,6 +5315,7 @@ fn collect_configured_channels(
                 )
                 .with_group_reply_allowed_senders(dc.group_reply_allowed_sender_ids())
                 .with_ack_reaction(config.channels_config.ack_reaction.discord.clone())
+                .with_transcription(config.transcription.clone())
                 .with_workspace_dir(config.workspace_dir.clone()),
             ),
         });
@@ -5335,6 +5737,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     }
 
     let provider_name = resolved_default_provider(&config);
+    let model = resolved_default_model(&config);
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: config.api_url.clone(),
@@ -5344,15 +5747,18 @@ pub async fn start_channels(config: Config) -> Result<()> {
         reasoning_enabled: config.runtime.reasoning_enabled,
         reasoning_level: config.effective_provider_reasoning_level(),
         custom_provider_api_mode: config.provider_api.map(|mode| mode.as_compatible_mode()),
+        custom_provider_auth_header: config.effective_custom_provider_auth_header(),
         max_tokens_override: None,
         model_support_vision: config.model_support_vision,
     };
     let provider: Arc<dyn Provider> = Arc::from(
-        create_resilient_provider_nonblocking(
+        create_routed_provider_nonblocking(
             &provider_name,
             config.api_key.clone(),
             config.api_url.clone(),
             config.reliability.clone(),
+            config.model_routes.clone(),
+            model.clone(),
             provider_runtime_options.clone(),
         )
         .await?,
@@ -5365,6 +5771,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     }
 
     let initial_stamp = config_file_stamp(&config.config_path).await;
+    let startup_semantic_guard = runtime_semantic_guard_from_config(&config);
     {
         let mut store = runtime_config_store()
             .lock()
@@ -5375,20 +5782,31 @@ pub async fn start_channels(config: Config) -> Result<()> {
                 defaults: runtime_defaults_from_config(&config),
                 perplexity_filter: config.security.perplexity_filter.clone(),
                 outbound_leak_guard: config.security.outbound_leak_guard.clone(),
+                canary_tokens: config.security.canary_tokens,
+                semantic_guard: startup_semantic_guard.clone(),
+                memory_config: config.memory.clone(),
                 last_applied_stamp: initial_stamp,
             },
         );
     }
+    maybe_log_semantic_guard_startup_status(
+        "startup",
+        &config.memory,
+        &startup_semantic_guard,
+        config.api_key.as_deref(),
+    );
 
-    let observer: Arc<dyn Observer> =
+    let base_observer: Arc<dyn Observer> =
         Arc::from(observability::create_observer(&config.observability));
+    let observer: Arc<dyn Observer> = Arc::new(
+        crate::plugins::bridge::observer::ObserverBridge::new(base_observer),
+    );
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
         Arc::from(runtime::create_runtime(&config.runtime)?);
     let security = Arc::new(SecurityPolicy::from_config(
         &config.autonomy,
         &config.workspace_dir,
     ));
-    let model = resolved_default_model(&config);
     let temperature = config.default_temperature;
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage(
         &config.memory,
@@ -5723,7 +6141,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         message_timeout_secs,
         interrupt_on_new_message,
         multimodal: config.multimodal.clone(),
-        hooks: crate::hooks::HookRunner::from_config(&config.hooks).map(Arc::new),
+        hooks: crate::hooks::create_runner_from_config(&config.hooks),
         non_cli_excluded_tools: Arc::new(Mutex::new(
             config.autonomy.non_cli_excluded_tools.clone(),
         )),
@@ -5732,18 +6150,10 @@ pub async fn start_channels(config: Config) -> Result<()> {
         // Preserve startup perplexity filter config to ensure policy is not weakened
         // when runtime store lookup misses.
         startup_perplexity_filter: config.security.perplexity_filter.clone(),
-        // WASM skill tools are sandboxed by the WASM engine and cannot access the
-        // host filesystem, network, or shell. Pre-approve them so they are not
-        // denied on non-CLI channels (which have no interactive stdin to prompt).
         approval_manager: {
-            let mut autonomy = config.autonomy.clone();
-            let skills_dir = workspace.join("skills");
-            for name in tools::wasm_tool::wasm_tool_names_from_skills(&skills_dir) {
-                if !autonomy.auto_approve.contains(&name) {
-                    autonomy.auto_approve.push(name);
-                }
-            }
-            Arc::new(ApprovalManager::from_config(&autonomy))
+            // Keep approval policy provenance-bound to static config. Do not
+            // auto-approve tool names from untrusted manifest files.
+            Arc::new(ApprovalManager::from_config(&config.autonomy))
         },
         safety_heartbeat: if config.agent.safety_heartbeat_interval > 0 {
             Some(SafetyHeartbeatConfig {
@@ -6786,6 +7196,36 @@ BTC is currently around $65,000 based on latest tool output."#
         }
     }
 
+    struct MockProcessTool;
+
+    #[async_trait::async_trait]
+    impl Tool for MockProcessTool {
+        fn name(&self) -> &str {
+            "process"
+        }
+
+        fn description(&self) -> &str {
+            "Mock process tool for runtime visibility tests"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+            Ok(ToolResult {
+                success: true,
+                output: String::new(),
+                error: None,
+            })
+        }
+    }
+
     #[test]
     fn build_runtime_tool_visibility_prompt_respects_excluded_snapshot() {
         let tools: Vec<Box<dyn Tool>> = vec![Box::new(MockPriceTool), Box::new(MockEchoTool)];
@@ -6802,6 +7242,23 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(native.contains("Runtime Tool Availability (Authoritative)"));
         assert!(native.contains("native provider function-calling"));
         assert!(!native.contains("## Tool Use Protocol"));
+    }
+
+    #[test]
+    fn build_runtime_tool_visibility_prompt_excludes_process_with_default_policy() {
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(MockProcessTool), Box::new(MockEchoTool)];
+        let excluded = crate::config::AutonomyConfig::default().non_cli_excluded_tools;
+
+        assert!(
+            excluded.contains(&"process".to_string()),
+            "default non-CLI exclusion list must include process"
+        );
+
+        let prompt = build_runtime_tool_visibility_prompt(&tools, &excluded, false);
+        assert!(prompt.contains("Excluded by runtime policy:"));
+        assert!(prompt.contains("process"));
+        assert!(!prompt.contains("**process**:"));
+        assert!(prompt.contains("`mock_echo`"));
     }
 
     #[tokio::test]
@@ -6902,7 +7359,7 @@ BTC is currently around $65,000 based on latest tool output."#
             auto_approve: vec!["mock_price".to_string()],
             ..crate::config::AutonomyConfig::default()
         };
-        let approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
+        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
@@ -6976,7 +7433,7 @@ BTC is currently around $65,000 based on latest tool output."#
             auto_approve: vec!["mock_price".to_string()],
             ..crate::config::AutonomyConfig::default()
         };
-        let approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
+        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
@@ -7064,7 +7521,7 @@ BTC is currently around $65,000 based on latest tool output."#
             auto_approve: vec!["mock_price".to_string()],
             ..crate::config::AutonomyConfig::default()
         };
-        let approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
+        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
@@ -7151,7 +7608,7 @@ BTC is currently around $65,000 based on latest tool output."#
             auto_approve: vec!["mock_price".to_string()],
             ..crate::config::AutonomyConfig::default()
         };
-        let approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
+        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
@@ -7297,7 +7754,7 @@ BTC is currently around $65,000 based on latest tool output."#
             auto_approve: vec!["mock_price".to_string()],
             ..crate::config::AutonomyConfig::default()
         };
-        let approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
+        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
@@ -9495,9 +9952,20 @@ BTC is currently around $65,000 based on latest tool output."#
                         api_url: None,
                         reliability: crate::config::ReliabilityConfig::default(),
                         cost: crate::config::CostConfig::default(),
+                        auto_save_memory: false,
+                        max_tool_iterations: 5,
+                        min_relevance_score: 0.0,
+                        message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+                        interrupt_on_new_message: false,
+                        multimodal: crate::config::MultimodalConfig::default(),
+                        query_classification: crate::config::QueryClassificationConfig::default(),
+                        model_routes: Vec::new(),
                     },
                     perplexity_filter: crate::config::PerplexityFilterConfig::default(),
                     outbound_leak_guard: crate::config::OutboundLeakGuardConfig::default(),
+                    canary_tokens: true,
+                    semantic_guard: RuntimeSemanticGuardState::default(),
+                    memory_config: crate::config::MemoryConfig::default(),
                     last_applied_stamp: None,
                 },
             );
@@ -9606,6 +10074,10 @@ BTC is currently around $65,000 based on latest tool output."#
         cfg.security.outbound_leak_guard.enabled = true;
         cfg.security.outbound_leak_guard.action = crate::config::OutboundLeakGuardAction::Block;
         cfg.security.outbound_leak_guard.sensitivity = 0.95;
+        cfg.security.semantic_guard = true;
+        cfg.security.semantic_guard_collection = "semantic_guard_test".to_string();
+        cfg.security.semantic_guard_threshold = 0.9;
+        cfg.memory.qdrant.url = Some("http://127.0.0.1:6333".to_string());
         cfg.save().await.expect("save config");
 
         let (_defaults, policy) = load_runtime_defaults_from_config_file(&config_path)
@@ -9641,6 +10113,13 @@ BTC is currently around $65,000 based on latest tool output."#
             crate::config::OutboundLeakGuardAction::Block
         );
         assert_eq!(policy.outbound_leak_guard.sensitivity, 0.95);
+        assert!(policy.semantic_guard.enabled);
+        assert_eq!(policy.semantic_guard.collection, "semantic_guard_test");
+        assert_eq!(policy.semantic_guard.threshold, 0.9);
+        assert_eq!(
+            policy.memory_config.qdrant.url.as_deref(),
+            Some("http://127.0.0.1:6333")
+        );
     }
 
     #[tokio::test]
@@ -9677,6 +10156,13 @@ BTC is currently around $65,000 based on latest tool output."#
         cfg.default_provider = Some("ollama".to_string());
         cfg.default_model = Some("llama3.2".to_string());
         cfg.api_key = Some("http://127.0.0.1:11434".to_string());
+        cfg.memory.auto_save = false;
+        cfg.memory.min_relevance_score = 0.15;
+        cfg.agent.max_tool_iterations = 5;
+        cfg.channels_config.message_timeout_secs = 45;
+        cfg.multimodal.allow_remote_fetch = false;
+        cfg.query_classification.enabled = false;
+        cfg.model_routes = vec![];
         cfg.autonomy.non_cli_natural_language_approval_mode =
             crate::config::NonCliNaturalLanguageApprovalMode::Direct;
         cfg.autonomy.non_cli_excluded_tools = vec!["shell".to_string()];
@@ -9743,6 +10229,15 @@ BTC is currently around $65,000 based on latest tool output."#
             runtime_outbound_leak_guard_snapshot(runtime_ctx.as_ref()).action,
             crate::config::OutboundLeakGuardAction::Redact
         );
+        assert!(!runtime_semantic_guard_snapshot(runtime_ctx.as_ref()).enabled);
+        let defaults = runtime_defaults_snapshot(runtime_ctx.as_ref());
+        assert!(!defaults.auto_save_memory);
+        assert_eq!(defaults.min_relevance_score, 0.15);
+        assert_eq!(defaults.max_tool_iterations, 5);
+        assert_eq!(defaults.message_timeout_secs, 45);
+        assert!(!defaults.multimodal.allow_remote_fetch);
+        assert!(!defaults.query_classification.enabled);
+        assert!(defaults.model_routes.is_empty());
 
         cfg.autonomy.non_cli_natural_language_approval_mode =
             crate::config::NonCliNaturalLanguageApprovalMode::Disabled;
@@ -9758,6 +10253,32 @@ BTC is currently around $65,000 based on latest tool output."#
         cfg.security.perplexity_filter.perplexity_threshold = 12.5;
         cfg.security.outbound_leak_guard.action = crate::config::OutboundLeakGuardAction::Block;
         cfg.security.outbound_leak_guard.sensitivity = 0.92;
+        cfg.security.semantic_guard = true;
+        cfg.security.semantic_guard_collection = "semantic_guard_reload".to_string();
+        cfg.security.semantic_guard_threshold = 0.88;
+        cfg.memory.qdrant.url = Some("http://127.0.0.1:6333".to_string());
+        cfg.memory.auto_save = true;
+        cfg.memory.min_relevance_score = 0.65;
+        cfg.agent.max_tool_iterations = 11;
+        cfg.channels_config.message_timeout_secs = 120;
+        cfg.multimodal.allow_remote_fetch = true;
+        cfg.query_classification.enabled = true;
+        cfg.query_classification.rules = vec![crate::config::ClassificationRule {
+            hint: "reasoning".to_string(),
+            keywords: vec!["analyze".to_string()],
+            patterns: vec!["deep".to_string()],
+            min_length: None,
+            max_length: None,
+            priority: 10,
+        }];
+        cfg.model_routes = vec![crate::config::ModelRouteConfig {
+            hint: "reasoning".to_string(),
+            provider: "openrouter".to_string(),
+            model: "openai/gpt-5.2".to_string(),
+            max_tokens: Some(512),
+            api_key: None,
+            transport: None,
+        }];
         cfg.save().await.expect("save updated config");
 
         maybe_apply_runtime_config_update(runtime_ctx.as_ref())
@@ -9789,11 +10310,63 @@ BTC is currently around $65,000 based on latest tool output."#
             crate::config::OutboundLeakGuardAction::Block
         );
         assert_eq!(leak_guard_cfg.sensitivity, 0.92);
+        let semantic_guard_cfg = runtime_semantic_guard_snapshot(runtime_ctx.as_ref());
+        assert!(semantic_guard_cfg.enabled);
+        assert_eq!(semantic_guard_cfg.collection, "semantic_guard_reload");
+        assert_eq!(semantic_guard_cfg.threshold, 0.88);
+        let memory_cfg = runtime_memory_config_snapshot(runtime_ctx.as_ref());
+        assert_eq!(
+            memory_cfg.qdrant.url.as_deref(),
+            Some("http://127.0.0.1:6333")
+        );
+        let defaults = runtime_defaults_snapshot(runtime_ctx.as_ref());
+        assert!(defaults.auto_save_memory);
+        assert_eq!(defaults.min_relevance_score, 0.65);
+        assert_eq!(defaults.max_tool_iterations, 11);
+        assert_eq!(defaults.message_timeout_secs, 120);
+        assert!(defaults.multimodal.allow_remote_fetch);
+        assert!(defaults.query_classification.enabled);
+        assert_eq!(defaults.query_classification.rules.len(), 1);
+        assert_eq!(defaults.model_routes.len(), 1);
 
         let mut store = runtime_config_store()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         store.remove(&config_path);
+    }
+
+    #[tokio::test]
+    async fn start_channels_uses_model_routes_when_global_provider_key_is_missing() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let workspace_dir = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+
+        let mut cfg = Config::default();
+        cfg.workspace_dir = workspace_dir;
+        cfg.config_path = temp.path().join("config.toml");
+        cfg.default_provider = None;
+        cfg.api_key = None;
+        cfg.default_model = Some("hint:fast".to_string());
+        cfg.model_routes = vec![crate::config::ModelRouteConfig {
+            hint: "fast".to_string(),
+            provider: "openai-codex".to_string(),
+            model: "gpt-5.3-codex".to_string(),
+            max_tokens: Some(512),
+            api_key: Some("route-specific-key".to_string()),
+            transport: Some("sse".to_string()),
+        }];
+
+        let config_path = cfg.config_path.clone();
+        let result = start_channels(cfg).await;
+        let mut store = runtime_config_store()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        store.remove(&config_path);
+
+        assert!(
+            result.is_ok(),
+            "start_channels should support routed providers without global credentials: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -10934,6 +11507,54 @@ BTC is currently around $65,000 based on latest tool output."#
         );
     }
 
+    #[test]
+    fn telegram_group_messages_prefix_sender_identity_for_llm() {
+        let msg = traits::ChannelMessage {
+            id: "msg_1".into(),
+            sender: "Kozimum".into(),
+            reply_target: "-100200300".into(),
+            content: "who am i?".into(),
+            channel: "telegram".into(),
+            timestamp: 1,
+            thread_ts: None,
+        };
+
+        let enriched = llm_user_content_with_sender_identity(&msg, &msg.content);
+        assert_eq!(enriched, "[sender: Kozimum] who am i?");
+    }
+
+    #[test]
+    fn telegram_dm_messages_do_not_prefix_sender_identity() {
+        let msg = traits::ChannelMessage {
+            id: "msg_1".into(),
+            sender: "Kozimum".into(),
+            reply_target: "12345".into(),
+            content: "who am i?".into(),
+            channel: "telegram".into(),
+            timestamp: 1,
+            thread_ts: None,
+        };
+
+        let enriched = llm_user_content_with_sender_identity(&msg, &msg.content);
+        assert_eq!(enriched, "who am i?");
+    }
+
+    #[test]
+    fn telegram_group_thread_messages_prefix_sender_identity_for_llm() {
+        let msg = traits::ChannelMessage {
+            id: "msg_1".into(),
+            sender: "Kozimum".into(),
+            reply_target: "-100200300:789".into(),
+            content: "who am i?".into(),
+            channel: "telegram".into(),
+            timestamp: 1,
+            thread_ts: Some("789".into()),
+        };
+
+        let enriched = llm_user_content_with_sender_identity(&msg, &msg.content);
+        assert_eq!(enriched, "[sender: Kozimum] who am i?");
+    }
+
     #[tokio::test]
     async fn autosave_keys_preserve_multiple_conversation_facts() {
         let tmp = TempDir::new().unwrap();
@@ -11559,6 +12180,16 @@ Done reminder set for 1:38 AM."#;
 
         let exposed = build_channel_system_prompt("base", "telegram", "chat", true);
         assert!(exposed.contains("user explicitly requested command/tool details"));
+    }
+
+    #[test]
+    fn build_channel_system_prompt_refreshes_datetime_section() {
+        let base_prompt =
+            "## Current Date & Time\n\n2000-01-01 00:00:00 (UTC)\n\n## Runtime\n\nHost: test";
+        let rendered = build_channel_system_prompt(base_prompt, "telegram", "chat", false);
+        assert!(!rendered.contains("2000-01-01 00:00:00 (UTC)"));
+        assert!(rendered.contains("## Current Date & Time\n\n"));
+        assert!(rendered.contains("## Runtime\n\nHost: test"));
     }
 
     #[test]

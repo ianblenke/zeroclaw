@@ -1,16 +1,8 @@
 name: CI/CD Change Audit
 
+# Moved off PR path per CI/CD optimization PRD.
+# Audit trail runs on push-to-main/dev only.
 on:
-    pull_request:
-        branches: [dev, main]
-        paths:
-            - ".github/workflows/**"
-            - ".github/release/**"
-            - ".github/codeql/**"
-            - "scripts/ci/**"
-            - ".github/dependabot.yml"
-            - "deny.toml"
-            - ".gitleaks.toml"
     push:
         branches: [dev, main]
         paths:
@@ -35,7 +27,7 @@ on:
                 type: boolean
 
 concurrency:
-    group: ci-change-audit-${{ github.event.pull_request.number || github.sha || github.run_id }}
+    group: ci-change-audit-${{ github.sha || github.run_id }}
     cancel-in-progress: true
 
 permissions:
@@ -50,7 +42,7 @@ env:
 jobs:
     audit:
         name: CI Change Audit
-        runs-on: ubuntu-22.04
+        runs-on: [self-hosted, Linux, X64, aws-india, light, cpu40]
         timeout-minutes: 15
         steps:
             - name: Checkout
@@ -59,9 +51,10 @@ jobs:
                   fetch-depth: 0
 
             - name: Setup Python
-              uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-              with:
-                  python-version: "3.12"
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  python3 --version
 
             - name: Resolve base/head commits
               id: refs

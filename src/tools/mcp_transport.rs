@@ -18,6 +18,14 @@ const MAX_LINE_BYTES: usize = 4 * 1024 * 1024; // 4 MB
 /// Timeout for init/list operations.
 const RECV_TIMEOUT_SECS: u64 = 30;
 
+/// Streamable HTTP Accept header required by MCP HTTP transport.
+const MCP_STREAMABLE_ACCEPT: &str = "application/json, text/event-stream";
+
+/// Default media type for MCP JSON-RPC request bodies.
+const MCP_JSON_CONTENT_TYPE: &str = "application/json";
+/// Streamable HTTP session header used to preserve MCP server state.
+const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
+
 // ── Transport Trait ──────────────────────────────────────────────────────
 
 /// Abstract transport for MCP communication.
@@ -143,6 +151,7 @@ pub struct HttpTransport {
     url: String,
     client: reqwest::Client,
     headers: std::collections::HashMap<String, String>,
+    session_id: Option<String>,
 }
 
 impl HttpTransport {
@@ -162,7 +171,27 @@ impl HttpTransport {
             url,
             client,
             headers: config.headers.clone(),
+            session_id: None,
         })
+    }
+
+    fn apply_session_header(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(session_id) = self.session_id.as_deref() {
+            req.header(MCP_SESSION_ID_HEADER, session_id)
+        } else {
+            req
+        }
+    }
+
+    fn update_session_id_from_headers(&mut self, headers: &reqwest::header::HeaderMap) {
+        if let Some(session_id) = headers
+            .get(MCP_SESSION_ID_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            self.session_id = Some(session_id.to_string());
+        }
     }
 }
 
@@ -171,14 +200,25 @@ impl McpTransportConn for HttpTransport {
     async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
         let body = serde_json::to_string(request)?;
 
-        let mut req = self
-            .client
-            .post(&self.url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream")
-            .body(body);
+        let has_accept = self
+            .headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("Accept"));
+        let has_content_type = self
+            .headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("Content-Type"));
+
+        let mut req = self.client.post(&self.url).body(body);
+        if !has_content_type {
+            req = req.header("Content-Type", MCP_JSON_CONTENT_TYPE);
+        }
         for (key, value) in &self.headers {
             req = req.header(key, value);
+        }
+        req = self.apply_session_header(req);
+        if !has_accept {
+            req = req.header("Accept", MCP_STREAMABLE_ACCEPT);
         }
 
         let resp = req
@@ -190,6 +230,8 @@ impl McpTransportConn for HttpTransport {
             bail!("MCP server returned HTTP {}", resp.status());
         }
 
+        self.update_session_id_from_headers(resp.headers());
+
         if request.id.is_none() {
             return Ok(JsonRpcResponse {
                 jsonrpc: crate::tools::mcp_protocol::JSONRPC_VERSION.to_string(),
@@ -199,11 +241,24 @@ impl McpTransportConn for HttpTransport {
             });
         }
 
-        let resp_text = resp.text().await.context("failed to read HTTP response")?;
-        let mcp_resp: JsonRpcResponse = serde_json::from_str(&resp_text)
-            .with_context(|| format!("invalid JSON-RPC response: {}", resp_text))?;
+        let is_sse = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"));
+        if is_sse {
+            let maybe_resp = timeout(
+                Duration::from_secs(RECV_TIMEOUT_SECS),
+                read_first_jsonrpc_from_sse_response(resp),
+            )
+            .await
+            .context("timeout waiting for MCP response from streamable HTTP SSE stream")??;
+            return maybe_resp
+                .ok_or_else(|| anyhow!("MCP server returned no response in SSE stream"));
+        }
 
-        Ok(mcp_resp)
+        let resp_text = resp.text().await.context("failed to read HTTP response")?;
+        parse_jsonrpc_response_text(&resp_text)
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -269,13 +324,20 @@ impl SseTransport {
             }
         }
 
+        let has_accept = self
+            .headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("Accept"));
+
         let mut req = self
             .client
             .get(&self.sse_url)
-            .header("Accept", "text/event-stream")
             .header("Cache-Control", "no-cache");
         for (key, value) in &self.headers {
             req = req.header(key, value);
+        }
+        if !has_accept {
+            req = req.header("Accept", MCP_STREAMABLE_ACCEPT);
         }
 
         let resp = req.send().await.context("SSE GET to MCP server failed")?;
@@ -561,6 +623,30 @@ fn extract_json_from_sse_text(resp_text: &str) -> Cow<'_, str> {
     Cow::Owned(joined.trim().to_string())
 }
 
+fn parse_jsonrpc_response_text(resp_text: &str) -> Result<JsonRpcResponse> {
+    let trimmed = resp_text.trim();
+    if trimmed.is_empty() {
+        bail!("MCP server returned no response");
+    }
+
+    let json_text = if looks_like_sse_text(trimmed) {
+        extract_json_from_sse_text(trimmed)
+    } else {
+        Cow::Borrowed(trimmed)
+    };
+
+    let mcp_resp: JsonRpcResponse = serde_json::from_str(json_text.as_ref())
+        .with_context(|| format!("invalid JSON-RPC response: {}", resp_text))?;
+    Ok(mcp_resp)
+}
+
+fn looks_like_sse_text(text: &str) -> bool {
+    text.starts_with("data:")
+        || text.starts_with("event:")
+        || text.contains("\ndata:")
+        || text.contains("\nevent:")
+}
+
 async fn read_first_jsonrpc_from_sse_response(
     resp: reqwest::Response,
 ) -> Result<Option<JsonRpcResponse>> {
@@ -678,21 +764,27 @@ impl McpTransportConn for SseTransport {
             .chain(secondary_url.into_iter())
             .enumerate()
         {
+            let has_accept = self
+                .headers
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("Accept"));
+            let has_content_type = self
+                .headers
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("Content-Type"));
             let mut req = self
                 .client
                 .post(&url)
                 .timeout(Duration::from_secs(120))
-                .body(body.clone())
-                .header("Content-Type", "application/json");
+                .body(body.clone());
+            if !has_content_type {
+                req = req.header("Content-Type", MCP_JSON_CONTENT_TYPE);
+            }
             for (key, value) in &self.headers {
                 req = req.header(key, value);
             }
-            if !self
-                .headers
-                .keys()
-                .any(|k| k.eq_ignore_ascii_case("Accept"))
-            {
-                req = req.header("Accept", "application/json, text/event-stream");
+            if !has_accept {
+                req = req.header("Accept", MCP_STREAMABLE_ACCEPT);
             }
 
             let resp = req.send().await.context("SSE POST to MCP server failed")?;
@@ -891,5 +983,77 @@ mod tests {
             ": keep-alive\n\nid: 1\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"result\":{}}\n\n";
         let extracted = extract_json_from_sse_text(input);
         let _: JsonRpcResponse = serde_json::from_str(extracted.as_ref()).unwrap();
+    }
+
+    #[test]
+    fn test_parse_jsonrpc_response_text_handles_plain_json() {
+        let parsed = parse_jsonrpc_response_text("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}")
+            .expect("plain JSON response should parse");
+        assert_eq!(parsed.id, Some(serde_json::json!(1)));
+        assert!(parsed.error.is_none());
+    }
+
+    #[test]
+    fn test_parse_jsonrpc_response_text_handles_sse_framed_json() {
+        let sse =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":true}}\n\n";
+        let parsed =
+            parse_jsonrpc_response_text(sse).expect("SSE-framed JSON response should parse");
+        assert_eq!(parsed.id, Some(serde_json::json!(2)));
+        assert_eq!(
+            parsed
+                .result
+                .as_ref()
+                .and_then(|v| v.get("ok"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_parse_jsonrpc_response_text_rejects_empty_payload() {
+        assert!(parse_jsonrpc_response_text(" \n\t ").is_err());
+    }
+
+    #[test]
+    fn http_transport_updates_session_id_from_response_headers() {
+        let config = McpServerConfig {
+            name: "test-http".into(),
+            transport: McpTransport::Http,
+            url: Some("http://localhost/mcp".into()),
+            ..Default::default()
+        };
+        let mut transport = HttpTransport::new(&config).expect("build transport");
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::HeaderName::from_static("mcp-session-id"),
+            reqwest::header::HeaderValue::from_static("session-abc"),
+        );
+        transport.update_session_id_from_headers(&headers);
+        assert_eq!(transport.session_id.as_deref(), Some("session-abc"));
+    }
+
+    #[test]
+    fn http_transport_injects_session_id_header_when_available() {
+        let config = McpServerConfig {
+            name: "test-http".into(),
+            transport: McpTransport::Http,
+            url: Some("http://localhost/mcp".into()),
+            ..Default::default()
+        };
+        let mut transport = HttpTransport::new(&config).expect("build transport");
+        transport.session_id = Some("session-xyz".to_string());
+
+        let req = transport
+            .apply_session_header(reqwest::Client::new().post("http://localhost/mcp"))
+            .build()
+            .expect("build request");
+        assert_eq!(
+            req.headers()
+                .get(MCP_SESSION_ID_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("session-xyz")
+        );
     }
 }
