@@ -1031,6 +1031,7 @@ mod tests {
                         id: "tc1".into(),
                         name: "echo".into(),
                         arguments: "{}".into(),
+                        thought_signature: None,
                     }],
                     usage: None,
                     reasoning_content: None,

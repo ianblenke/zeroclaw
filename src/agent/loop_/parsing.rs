@@ -2385,6 +2385,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "shell".to_string(),
             arguments: r#"{"command":"ls"}"#.to_string(),
+            thought_signature: None,
         }];
         let result = parse_structured_tool_calls(&tool_calls);
         assert_eq!(result.len(), 1);
@@ -2403,6 +2404,7 @@ mod tests {
             id: "call_2".to_string(),
             name: "shell".to_string(),
             arguments: "not json".to_string(),
+            thought_signature: None,
         }];
         let result = parse_structured_tool_calls(&tool_calls);
         assert_eq!(result.len(), 1);

@@ -686,6 +686,11 @@ struct ToolCall {
     // Compatibility: DeepSeek sometimes wraps arguments differently
     #[serde(rename = "parameters", default)]
     parameters: Option<serde_json::Value>,
+
+    // Gemini 3.x thinking: opaque signature that must round-trip
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    thought_signature: Option<String>,
 }
 
 impl ToolCall {
@@ -1068,6 +1073,7 @@ fn extract_responses_tool_calls(response: &ResponsesResponse) -> Vec<ProviderToo
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 name,
                 arguments,
+                thought_signature: None,
             })
         })
         .collect()
@@ -1876,6 +1882,7 @@ impl OpenAiCompatibleProvider {
                     name: None,
                     arguments: None,
                     parameters: None,
+                    thought_signature: tc.thought_signature,
                 })
                 .collect::<Vec<_>>();
             if !tool_calls.is_empty() {
@@ -1903,6 +1910,7 @@ impl OpenAiCompatibleProvider {
                     name: None,
                     arguments: None,
                     parameters: None,
+                    thought_signature: call.thought_signature,
                 });
             }
             if !normalized_calls.is_empty() {
@@ -1982,6 +1990,7 @@ impl OpenAiCompatibleProvider {
                     id: tc.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                     name,
                     arguments: normalized_arguments,
+                    thought_signature: tc.thought_signature,
                 })
             })
             .collect::<Vec<_>>();
@@ -2432,6 +2441,7 @@ impl Provider for OpenAiCompatibleProvider {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|tc| {
+                let thought_signature = tc.thought_signature.clone();
                 let function = tc.function?;
                 let name = function.name?;
                 let arguments = function.arguments.unwrap_or_else(|| "{}".to_string());
@@ -2439,6 +2449,7 @@ impl Provider for OpenAiCompatibleProvider {
                     id: uuid::Uuid::new_v4().to_string(),
                     name,
                     arguments,
+                    thought_signature,
                 })
             })
             .collect::<Vec<_>>();
@@ -3647,6 +3658,7 @@ mod tests {
                     name: None,
                     arguments: None,
                     parameters: None,
+                    thought_signature: None,
                 }]),
                 reasoning_content: None,
             },
@@ -4763,6 +4775,7 @@ mod tests {
                     name: None,
                     arguments: None,
                     parameters: None,
+                    thought_signature: None,
                 }]),
             },
             finish_reason: Some("length".to_string()),

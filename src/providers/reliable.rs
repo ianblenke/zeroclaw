@@ -1889,6 +1889,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "shell".to_string(),
             arguments: r#"{"command":"date"}"#.to_string(),
+            thought_signature: None,
         };
         let provider = ReliableProvider::new(
             vec![(
@@ -1925,6 +1926,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "shell".to_string(),
             arguments: r#"{"command":"date"}"#.to_string(),
+            thought_signature: None,
         };
         let provider = ReliableProvider::new(
             vec![(

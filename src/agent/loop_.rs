@@ -2783,7 +2783,7 @@ pub async fn run(
         tracing::info!(count = peripheral_tools.len(), "Peripheral tools added");
         tools_registry.extend(peripheral_tools);
     }
-    let tools_registry = filter_primary_agent_tools_or_fail(&config, tools_registry)?;
+    let mut tools_registry = filter_primary_agent_tools_or_fail(&config, tools_registry)?;
 
     // Wire MCP tools into the registry for model listing.
     if let Some(ref registry) = mcp_registry {
@@ -3539,7 +3539,7 @@ pub async fn process_message_with_session(
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
     tools_registry.extend(peripheral_tools);
-    let tools_registry = filter_primary_agent_tools_or_fail(&config, tools_registry)?;
+    let mut tools_registry = filter_primary_agent_tools_or_fail(&config, tools_registry)?;
 
     // Wire MCP tools into the registry for model listing.
     if let Some(ref registry) = mcp_registry {
@@ -5495,6 +5495,7 @@ mod tests {
                     id: "call_bad".to_string(),
                     name: "count_tool".to_string(),
                     arguments: "{\"value\":\"truncated\"".to_string(),
+                    thought_signature: None,
                 }],
                 usage: None,
                 reasoning_content: None,
@@ -5508,6 +5509,7 @@ mod tests {
                     id: "call_good".to_string(),
                     name: "count_tool".to_string(),
                     arguments: "{\"value\":\"fixed\"}".to_string(),
+                    thought_signature: None,
                 }],
                 usage: None,
                 reasoning_content: None,
@@ -5593,6 +5595,7 @@ mod tests {
                     id: "call_bad".to_string(),
                     name: "count_tool".to_string(),
                     arguments: "{\"value\":\"truncated\"".to_string(),
+                    thought_signature: None,
                 }],
                 usage: None,
                 reasoning_content: None,
@@ -5606,6 +5609,7 @@ mod tests {
                     id: "call_good".to_string(),
                     name: "count_tool".to_string(),
                     arguments: "{\"value\":\"from_native_fixed\"}".to_string(),
+                    thought_signature: None,
                 }],
                 usage: None,
                 reasoning_content: None,
@@ -5686,6 +5690,7 @@ mod tests {
                     id: "call_valid".to_string(),
                     name: "count_tool".to_string(),
                     arguments: "{\"value\":\"from_valid_native\"}".to_string(),
+                    thought_signature: None,
                 }],
                 usage: None,
                 reasoning_content: None,
@@ -7192,6 +7197,7 @@ Done."#;
             id: "call_1".to_string(),
             name: "shell".to_string(),
             arguments: "ls -la".to_string(),
+            thought_signature: None,
         }];
         let parsed = parse_structured_tool_calls(&calls);
         assert_eq!(parsed.invalid_json_arguments, 0);
@@ -7212,6 +7218,7 @@ Done."#;
             id: "call_bad".to_string(),
             name: "count_tool".to_string(),
             arguments: "{\"value\":\"unterminated\"".to_string(),
+            thought_signature: None,
         }];
         let parsed = parse_structured_tool_calls(&calls);
         assert_eq!(parsed.calls.len(), 0);
@@ -7734,6 +7741,7 @@ Let me check the result."#;
             id: "call_1".into(),
             name: "shell".into(),
             arguments: "{}".into(),
+            thought_signature: None,
         }];
         let result = build_native_assistant_history("answer", &calls, Some("thinking step"));
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -7748,6 +7756,7 @@ Let me check the result."#;
             id: "call_1".into(),
             name: "shell".into(),
             arguments: "{}".into(),
+            thought_signature: None,
         }];
         let result = build_native_assistant_history("answer", &calls, None);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();

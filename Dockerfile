@@ -42,6 +42,8 @@ RUN rm -rf src benches crates/robot-kit/src crates/zeroclaw-types/src crates/zer
 
 # 2. Copy only build-relevant source paths (avoid cache-busting on docs/tests/scripts)
 COPY src/ src/
+# include_str!() in semantic_guard.rs embeds this at compile time
+COPY data/security/attack-corpus-v1.jsonl data/security/attack-corpus-v1.jsonl
 COPY benches/ benches/
 COPY crates/ crates/
 COPY firmware/ firmware/

@@ -56,6 +56,11 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// Opaque signature from thinking models (e.g. Gemini 3.x) that must be
+    /// echoed back on the next request so the provider can verify the thinking
+    /// chain wasn't tampered with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Raw token counts from a single LLM API response.
@@ -640,6 +645,7 @@ mod tests {
                 id: "1".into(),
                 name: "shell".into(),
                 arguments: "{}".into(),
+                thought_signature: None,
             }],
             usage: None,
             reasoning_content: None,
@@ -682,6 +688,7 @@ mod tests {
             id: "call_123".into(),
             name: "file_read".into(),
             arguments: r#"{"path":"test.txt"}"#.into(),
+            thought_signature: None,
         };
         let json = serde_json::to_string(&tc).unwrap();
         assert!(json.contains("call_123"));

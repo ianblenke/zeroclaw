@@ -450,6 +450,7 @@ impl AnthropicProvider {
                         id: block.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                         name,
                         arguments: arguments.to_string(),
+                        thought_signature: None,
                     });
                 }
                 _ => {}

@@ -194,6 +194,7 @@ pub async fn run_research_phase(
                         .unwrap_or_else(|| format!("tc_{}_{}", iteration, i)),
                     name: p.name,
                     arguments: serde_json::to_string(&p.arguments).unwrap_or_default(),
+                    thought_signature: None,
                 })
                 .collect()
         };
