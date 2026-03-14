@@ -99,10 +99,13 @@ EOF
 # ── Stage 2: Development Runtime (Debian) ────────────────────
 FROM debian:trixie-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430 AS dev
 
-# Install essential runtime dependencies only (use docker-compose.override.yml for dev tools)
+# Install essential runtime dependencies + Node.js for Claude Code CLI
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /zeroclaw-data /zeroclaw-data

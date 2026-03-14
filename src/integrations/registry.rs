@@ -491,6 +491,21 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             },
         },
         IntegrationEntry {
+            name: "Claude Code",
+            description: "Claude Opus 4.6 & Sonnet 4.6 via CLI (OAuth, no API key)",
+            category: IntegrationCategory::AiModel,
+            status_fn: |c| {
+                if c.default_provider.as_deref().is_some_and(|provider| {
+                    provider.eq_ignore_ascii_case("claude-code")
+                        || provider.eq_ignore_ascii_case("claude_code")
+                }) {
+                    IntegrationStatus::Active
+                } else {
+                    IntegrationStatus::Available
+                }
+            },
+        },
+        IntegrationEntry {
             name: "Ollama",
             description: "Local models (Llama, etc.)",
             category: IntegrationCategory::AiModel,

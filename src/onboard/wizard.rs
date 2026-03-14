@@ -1048,6 +1048,7 @@ fn default_model_for_provider(provider: &str) -> String {
         "qwen-code" => "qwen3-coder-plus".into(),
         "ollama" => "llama3.2".into(),
         "llamacpp" => "ggml-org/gpt-oss-20b-GGUF".into(),
+        "claude-code" => "claude-code/opus-high".into(),
         "sglang" | "vllm" | "osaurus" | "copilot" => "default".into(),
         "gemini" => "gemini-2.5-pro".into(),
         "kimi-code" => "kimi-for-coding".into(),
@@ -1590,6 +1591,44 @@ fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)> {
             (
                 "gemini-2.5-flash-lite".to_string(),
                 "Gemini 2.5 Flash-Lite (lowest cost)".to_string(),
+            ),
+        ],
+        "claude-code" => vec![
+            (
+                "claude-code/opus-high".to_string(),
+                "Claude Opus 4.6 — high effort (most capable)".to_string(),
+            ),
+            (
+                "claude-code/opus-medium".to_string(),
+                "Claude Opus 4.6 — medium effort".to_string(),
+            ),
+            (
+                "claude-code/opus-low".to_string(),
+                "Claude Opus 4.6 — low effort (fastest)".to_string(),
+            ),
+            (
+                "claude-code/sonnet-high".to_string(),
+                "Claude Sonnet 4.6 — high effort".to_string(),
+            ),
+            (
+                "claude-code/sonnet-medium".to_string(),
+                "Claude Sonnet 4.6 — medium effort".to_string(),
+            ),
+            (
+                "claude-code/sonnet-low".to_string(),
+                "Claude Sonnet 4.6 — low effort (fastest)".to_string(),
+            ),
+            (
+                "claude-code/haiku-high".to_string(),
+                "Claude Haiku 4.5 — high effort".to_string(),
+            ),
+            (
+                "claude-code/haiku-medium".to_string(),
+                "Claude Haiku 4.5 — medium effort".to_string(),
+            ),
+            (
+                "claude-code/haiku-low".to_string(),
+                "Claude Haiku 4.5 — low effort (fastest, cheapest)".to_string(),
             ),
         ],
         "copilot" => vec![(

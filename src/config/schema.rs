@@ -94,6 +94,7 @@ pub fn default_model_fallback_for_provider(provider_name: Option<&str>) -> &'sta
         "qwen-code" => "qwen3-coder-plus",
         "ollama" => "llama3.2",
         "llamacpp" => "ggml-org/gpt-oss-20b-GGUF",
+        "claude-code" => "claude-code/opus-high",
         "sglang" | "vllm" | "osaurus" | "copilot" => "default",
         "gemini" => "gemini-2.5-pro",
         "kimi-code" => "kimi-for-coding",

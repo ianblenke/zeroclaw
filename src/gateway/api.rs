@@ -695,6 +695,32 @@ fn integration_settings_fields(
             ];
             (has_key, fields)
         }
+        "Claude Code" => {
+            let is_configured = config
+                .default_provider
+                .as_deref()
+                .is_some_and(|p| p == "claude-code" || p == "claude_code");
+            let fields = vec![serde_json::json!({
+                "key": "default_model",
+                "label": "Default Model",
+                "required": false,
+                "has_value": config.default_model.is_some(),
+                "input_type": "select",
+                "options": [
+                    "claude-code/opus-high",
+                    "claude-code/opus-medium",
+                    "claude-code/opus-low",
+                    "claude-code/sonnet-high",
+                    "claude-code/sonnet-medium",
+                    "claude-code/sonnet-low",
+                    "claude-code/haiku-high",
+                    "claude-code/haiku-medium",
+                    "claude-code/haiku-low"
+                ],
+                "current_value": config.default_model.as_deref().unwrap_or(""),
+            })];
+            (is_configured, fields)
+        }
         _ => {
             // Default: no configurable fields
             (false, vec![])

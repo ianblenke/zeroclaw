@@ -20,18 +20,22 @@ services:
       - API_KEY=${API_KEY:-}
       # Or use the prefixed version:
       # - ZEROCLAW_API_KEY=${ZEROCLAW_API_KEY:-}
-      
+
       # Optional: LLM provider (default: openrouter)
-      # Options: openrouter, openai, anthropic, ollama
+      # Options: openrouter, openai, anthropic, ollama, claude-code
       - PROVIDER=${PROVIDER:-openrouter}
-      
+
       # Allow public bind inside Docker (required for container networking)
       - ZEROCLAW_ALLOW_PUBLIC_BIND=true
       # Default gateway port inside container
       - ZEROCLAW_GATEWAY_PORT=${ZEROCLAW_GATEWAY_PORT:-42617}
-      
+
       # Optional: Model override
       # - ZEROCLAW_MODEL=anthropic/claude-sonnet-4-20250514
+
+      # Claude Code OAuth (for claude-code provider in Docker)
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      - CLAUDE_CODE_OAUTH_REFRESH_TOKEN=${CLAUDE_CODE_OAUTH_REFRESH_TOKEN:-}
       
     volumes:
       # Persist workspace and config (must match WORKDIR/HOME in Dockerfile)

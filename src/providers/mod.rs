@@ -19,6 +19,7 @@
 pub mod anthropic;
 pub mod backoff;
 pub mod bedrock;
+pub mod claude_code;
 pub mod compatible;
 pub mod copilot;
 pub mod cursor;
@@ -979,6 +980,8 @@ fn resolve_provider_credential(name: &str, credential_override: Option<&str>) ->
         }
         name if is_glm_alias(name) => vec!["GLM_API_KEY"],
         name if is_minimax_alias(name) => vec![MINIMAX_OAUTH_TOKEN_ENV, MINIMAX_API_KEY_ENV],
+        // Claude Code uses local CLI auth (OAuth), not an API key.
+        "claude-code" | "claude_code" => return None,
         // Bedrock uses AWS AKSK from env vars (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY),
         // not a single API key. Credential resolution happens inside BedrockProvider.
         "bedrock" | "aws-bedrock" => return None,
@@ -1069,6 +1072,11 @@ pub(crate) fn provider_credential_available(name: &str, credential_override: Opt
         }
 
         return read_non_empty_env(QWEN_OAUTH_REFRESH_TOKEN_ENV).is_some();
+    }
+
+    // Claude Code uses its own CLI OAuth — no API key needed.
+    if matches!(name, "claude-code" | "claude_code") {
+        return true;
     }
 
     if matches!(name, "gemini" | "google" | "google-gemini") {
@@ -1465,6 +1473,7 @@ fn create_provider_with_url_and_options(
             AuthStyle::Bearer,
         ))),
         "copilot" | "github-copilot" => Ok(Box::new(copilot::CopilotProvider::new(key))),
+        "claude-code" | "claude_code" => Ok(Box::new(claude_code::ClaudeCodeProvider::new())),
         "cursor" => Ok(Box::new(cursor::CursorProvider::new())),
         "lmstudio" | "lm-studio" => {
             let (base_url, lm_studio_key) = resolve_lmstudio_connection(api_url, key);
@@ -2158,6 +2167,12 @@ pub fn list_providers() -> Vec<ProviderInfo> {
             display_name: "GitHub Copilot",
             aliases: &["github-copilot"],
             local: false,
+        },
+        ProviderInfo {
+            name: "claude-code",
+            display_name: "Claude Code (CLI)",
+            aliases: &["claude_code"],
+            local: true,
         },
         ProviderInfo {
             name: "cursor",
@@ -2944,6 +2959,12 @@ mod tests {
     }
 
     #[test]
+    fn factory_claude_code() {
+        assert!(create_provider("claude-code", None).is_ok());
+        assert!(create_provider("claude_code", None).is_ok());
+    }
+
+    #[test]
     fn factory_cursor() {
         assert!(create_provider("cursor", None).is_ok());
     }
@@ -3370,6 +3391,7 @@ providers = ["demo-plugin-provider"]
             "huggingface",
             "replicate",
             "copilot",
+            "claude-code",
             "cursor",
             "nvidia",
             "astrai",
