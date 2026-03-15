@@ -8,6 +8,7 @@
 //! - Header sanitization (handled by axum/hyper)
 
 pub mod api;
+mod mcp_server;
 mod mock_dashboard;
 mod openai_compat;
 mod openclaw_compat;
@@ -909,6 +910,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let main_routes = Router::new()
         // ── Existing routes ──
         .route("/health", get(handle_health))
+        .route("/mcp", post(mcp_server::handle_mcp))
         .route("/metrics", get(handle_metrics))
         .route("/pair", post(handle_pair))
         .route("/webhook", get(handle_webhook_usage).post(handle_webhook))
