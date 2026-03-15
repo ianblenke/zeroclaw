@@ -469,7 +469,7 @@ impl Tool for BgRunTool {
                 .update(&job_id_for_task, status.clone(), output.clone(), error.clone())
                 .await;
 
-            // Push completion event to WebSocket clients
+            // Push completion event to WebSocket clients via broadcast channel
             if let Some(ref tx) = event_tx {
                 let _ = tx.send(serde_json::json!({
                     "type": "bg_job_complete",
@@ -479,6 +479,26 @@ impl Tool for BgRunTool {
                     "has_result": output.is_some(),
                 }));
             }
+
+            // Also POST to the internal push endpoint so all WS sessions
+            // receive a proactive notification (works even when event_tx
+            // isn't wired up, e.g. when bg_run is called via MCP).
+            let status_label = format!("{status:?}").to_lowercase();
+            let result_preview = output.as_deref().unwrap_or("").chars().take(200).collect::<String>();
+            let push_content = format!(
+                "Background task completed: {} ({})\nStatus: {}\n{}",
+                tool_name_for_event, job_id_for_task, status_label,
+                if result_preview.is_empty() { String::new() } else { format!("Result: {result_preview}") }
+            );
+            let port = std::env::var("ZEROCLAW_GATEWAY_PORT").unwrap_or_else(|_| "42617".into());
+            let _ = reqwest::Client::new()
+                .post(format!("http://127.0.0.1:{port}/api/internal/push"))
+                .json(&serde_json::json!({
+                    "content": push_content,
+                    "source": "bg_run",
+                }))
+                .send()
+                .await;
         });
 
         let output = serde_json::json!({
