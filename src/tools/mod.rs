@@ -295,13 +295,29 @@ pub fn add_bg_tools(
     tools: Vec<Box<dyn Tool>>,
     mcp_registry: Option<Arc<mcp_client::McpRegistry>>,
 ) -> (Vec<Box<dyn Tool>>, BgJobStore) {
+    add_bg_tools_with_options(tools, mcp_registry, None, None)
+}
+
+/// Add background tool execution with configurable timeout and event notifications.
+pub fn add_bg_tools_with_options(
+    tools: Vec<Box<dyn Tool>>,
+    mcp_registry: Option<Arc<mcp_client::McpRegistry>>,
+    timeout_secs: Option<u64>,
+    event_tx: Option<tokio::sync::broadcast::Sender<serde_json::Value>>,
+) -> (Vec<Box<dyn Tool>>, BgJobStore) {
     let bg_job_store = BgJobStore::new();
     let tool_arcs: Vec<Arc<dyn Tool>> = tools
         .into_iter()
         .map(|t| Arc::from(t) as Arc<dyn Tool>)
         .collect();
     let tools_arc = Arc::new(tool_arcs);
-    let bg_run = BgRunTool::new(bg_job_store.clone(), Arc::clone(&tools_arc), mcp_registry);
+    let mut bg_run = BgRunTool::new(bg_job_store.clone(), Arc::clone(&tools_arc), mcp_registry);
+    if let Some(secs) = timeout_secs {
+        bg_run = bg_run.with_timeout_secs(secs);
+    }
+    if let Some(tx) = event_tx {
+        bg_run = bg_run.with_event_tx(tx);
+    }
     let bg_status = BgStatusTool::new(bg_job_store.clone());
     let mut extended: Vec<Arc<dyn Tool>> = (*tools_arc).clone();
     extended.push(Arc::new(bg_run));

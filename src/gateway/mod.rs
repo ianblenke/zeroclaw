@@ -472,7 +472,32 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         (None, None)
     };
 
-    let tools_registry_exec: Arc<Vec<Box<dyn Tool>>> = Arc::new(tools::all_tools_with_runtime(
+    // ── MCP (connect at gateway startup so WS sessions see MCP tools) ──
+    let mcp_registry: Option<Arc<tools::McpRegistry>> =
+        if config.mcp.enabled && !config.mcp.servers.is_empty() {
+            tracing::info!(
+                "Gateway: initializing MCP client — {} server(s) configured",
+                config.mcp.servers.len()
+            );
+            match tools::McpRegistry::connect_all(&config.mcp.servers).await {
+                Ok(registry) => {
+                    tracing::info!(
+                        "Gateway: MCP ready — {} tool(s) from {} server(s)",
+                        registry.tool_names().len(),
+                        registry.server_count()
+                    );
+                    Some(Arc::new(registry))
+                }
+                Err(e) => {
+                    tracing::error!("Gateway: MCP registry failed: {e:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    let mut built_tools = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
         &security,
         runtime,
@@ -486,8 +511,29 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         &config.agents,
         config.api_key.as_deref(),
         &config,
-        None,
-    ));
+        mcp_registry.clone(),
+    );
+
+    // Wrap each MCP tool as an individual Tool entry so WS sessions can call them.
+    if let Some(ref registry) = mcp_registry {
+        let names = registry.tool_names();
+        for name in names {
+            if let Some(def) = registry.get_tool_def(&name).await {
+                built_tools.push(Box::new(tools::McpToolWrapper::new(
+                    name,
+                    def,
+                    std::sync::Arc::clone(registry),
+                )));
+            }
+        }
+        tracing::info!(
+            "Gateway: {} total tools ({} MCP wrappers added)",
+            built_tools.len(),
+            registry.tool_names().len(),
+        );
+    }
+
+    let tools_registry_exec: Arc<Vec<Box<dyn Tool>>> = Arc::new(built_tools);
     let tools_registry: Arc<Vec<ToolSpec>> =
         Arc::new(tools_registry_exec.iter().map(|t| t.spec()).collect());
     let max_tool_iterations = config.agent.max_tool_iterations;

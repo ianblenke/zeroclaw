@@ -1173,6 +1173,14 @@ pub struct AgentConfig {
     /// set to `0` for explicit disable.
     #[serde(default = "default_safety_heartbeat_turn_interval")]
     pub safety_heartbeat_turn_interval: usize,
+    /// Background tool execution timeout (seconds). Default: `1800` (30 min).
+    /// Deep research and long-running MCP operations may need higher values.
+    #[serde(default = "default_bg_tool_timeout_secs")]
+    pub bg_tool_timeout_secs: u64,
+}
+
+fn default_bg_tool_timeout_secs() -> u64 {
+    1800
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1282,6 +1290,7 @@ impl Default for AgentConfig {
             loop_detection_failure_streak: default_loop_detection_failure_streak(),
             safety_heartbeat_interval: default_safety_heartbeat_interval(),
             safety_heartbeat_turn_interval: default_safety_heartbeat_turn_interval(),
+            bg_tool_timeout_secs: default_bg_tool_timeout_secs(),
         }
     }
 }

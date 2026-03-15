@@ -32,8 +32,10 @@ use tokio::time::{timeout, Duration};
 use super::mcp_client::McpRegistry;
 use super::traits::{Tool, ToolResult};
 
-/// Hard timeout for background tool execution (seconds).
-const BG_TOOL_TIMEOUT_SECS: u64 = 600;
+/// Default timeout for background tool execution (seconds).
+/// Raised from 600s to 1800s (30 min) to support deep research and quest delegation.
+/// Can be overridden at runtime via `BgRunTool::with_timeout_secs`.
+const DEFAULT_BG_TOOL_TIMEOUT_SECS: u64 = 1800;
 
 /// Time after delivery before a job is eligible for cleanup (seconds).
 const DELIVERED_JOB_EXPIRY_SECS: u64 = 300;
@@ -271,6 +273,10 @@ pub struct BgRunTool {
     tools: Arc<Vec<Arc<dyn Tool>>>,
     /// Optional MCP registry for fallback tool lookup (avoids context pollution).
     mcp_registry: Option<Arc<McpRegistry>>,
+    /// Configurable timeout (seconds). Defaults to 600s.
+    timeout_secs: u64,
+    /// Optional broadcast channel for notifying WebSocket clients on completion.
+    event_tx: Option<tokio::sync::broadcast::Sender<serde_json::Value>>,
 }
 
 impl BgRunTool {
@@ -284,7 +290,21 @@ impl BgRunTool {
             job_store,
             tools,
             mcp_registry,
+            timeout_secs: DEFAULT_BG_TOOL_TIMEOUT_SECS,
+            event_tx: None,
         }
+    }
+
+    /// Set a custom timeout (seconds) for background tool execution.
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
+    }
+
+    /// Set a broadcast channel for pushing completion notifications.
+    pub fn with_event_tx(mut self, tx: tokio::sync::broadcast::Sender<serde_json::Value>) -> Self {
+        self.event_tx = Some(tx);
+        self
     }
 
     /// Find a tool by name — checks built-in tools first, then MCP registry.
@@ -312,9 +332,9 @@ impl Tool for BgRunTool {
 
     fn description(&self) -> &str {
         "Execute a tool in the background and return a job ID immediately. \
-         Use this for long-running operations where you don't want to block. \
-         Check results with bg_status or wait for auto-injection in the next turn. \
-         Background tools have a 600-second maximum timeout."
+         Use this for long-running operations (deep research, quests, etc.) \
+         where you don't want to block the conversation. \
+         Check results with bg_status or wait for auto-injection in the next turn."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -411,16 +431,19 @@ impl Tool for BgRunTool {
             .await;
 
         // Spawn background execution
+        let timeout_secs = self.timeout_secs;
+        let event_tx = self.event_tx.clone();
+        let tool_name_for_event = tool_name.to_string();
         tokio::spawn(async move {
             let result = timeout(
-                Duration::from_secs(BG_TOOL_TIMEOUT_SECS),
+                Duration::from_secs(timeout_secs),
                 tool.execute(arguments),
             )
             .await;
 
-            match result {
+            let (status, output, error) = match result {
                 Ok(Ok(tool_result)) => {
-                    let (status, output, error) = if tool_result.success {
+                    if tool_result.success {
                         (
                             BgJobStatus::Complete,
                             Some(tool_result.output),
@@ -432,31 +455,29 @@ impl Tool for BgRunTool {
                             Some(tool_result.output),
                             tool_result.error,
                         )
-                    };
-                    job_store
-                        .update(&job_id_for_task, status, output, error)
-                        .await;
+                    }
                 }
-                Ok(Err(e)) => {
-                    job_store
-                        .update(
-                            &job_id_for_task,
-                            BgJobStatus::Failed,
-                            None,
-                            Some(e.to_string()),
-                        )
-                        .await;
-                }
-                Err(_) => {
-                    job_store
-                        .update(
-                            &job_id_for_task,
-                            BgJobStatus::Failed,
-                            None,
-                            Some(format!("timed out after {BG_TOOL_TIMEOUT_SECS}s")),
-                        )
-                        .await;
-                }
+                Ok(Err(e)) => (BgJobStatus::Failed, None, Some(e.to_string())),
+                Err(_) => (
+                    BgJobStatus::Failed,
+                    None,
+                    Some(format!("timed out after {timeout_secs}s")),
+                ),
+            };
+
+            job_store
+                .update(&job_id_for_task, status.clone(), output.clone(), error.clone())
+                .await;
+
+            // Push completion event to WebSocket clients
+            if let Some(ref tx) = event_tx {
+                let _ = tx.send(serde_json::json!({
+                    "type": "bg_job_complete",
+                    "job_id": job_id_for_task,
+                    "tool": tool_name_for_event,
+                    "status": format!("{status:?}").to_lowercase(),
+                    "has_result": output.is_some(),
+                }));
             }
         });
 
