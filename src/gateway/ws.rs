@@ -617,6 +617,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                 let state_for_task = state.clone();
                 let content_for_task = content.clone();
                 let ws_session_for_task = ws_session_id.clone();
+                // Pass conversation history so the LLM sees prior turns.
+                // Limit to recent turns to avoid context overflow.
+                let max_history_messages = {
+                    state.config.lock().agent.max_history_messages
+                };
+                let history_for_task: Vec<crate::providers::ChatMessage> = if history.len() > max_history_messages + 1 {
+                    // Keep system prompt + last N turns
+                    let mut trimmed = vec![history[0].clone()];
+                    trimmed.extend_from_slice(&history[history.len() - max_history_messages..]);
+                    trimmed
+                } else {
+                    history.clone()
+                };
 
                 let agent_handle = tokio::spawn(async move {
                     super::run_gateway_streaming_chat_with_tools(
@@ -624,6 +637,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                         &content_for_task,
                         Some(&ws_session_for_task),
                         delta_tx,
+                        Some(history_for_task),
                     )
                     .await
                 });

@@ -3473,6 +3473,21 @@ pub async fn process_message_with_session(
     session_id: Option<&str>,
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
+    process_message_with_session_and_history(config, message, session_id, on_delta, None).await
+}
+
+/// Process a message with optional pre-built conversation history.
+///
+/// When `prior_history` is provided, it's used instead of building fresh
+/// `[system, user]` history. This allows WS sessions to preserve conversation
+/// context across turns.
+pub async fn process_message_with_session_and_history(
+    config: Config,
+    message: &str,
+    session_id: Option<&str>,
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
+    prior_history: Option<Vec<ChatMessage>>,
+) -> Result<String> {
     if let Err(error) = crate::plugins::runtime::initialize_from_config(&config.plugins) {
         tracing::warn!("plugin registry initialization skipped: {error}");
     }
@@ -3750,10 +3765,21 @@ pub async fn process_message_with_session(
         format!("{context}[{now}] {message}")
     };
 
-    let mut history = vec![
-        ChatMessage::system(&system_prompt),
-        ChatMessage::user(&enriched),
-    ];
+    let mut history = if let Some(mut prior) = prior_history {
+        // Use prior conversation history — update system prompt and append current message.
+        if let Some(first) = prior.first_mut() {
+            if first.role == crate::providers::ROLE_SYSTEM {
+                first.content = system_prompt.clone();
+            }
+        }
+        prior.push(ChatMessage::user(&enriched));
+        prior
+    } else {
+        vec![
+            ChatMessage::system(&system_prompt),
+            ChatMessage::user(&enriched),
+        ]
+    };
 
     let cost_enforcement_context =
         create_cost_enforcement_context(&config.cost, &config.workspace_dir);

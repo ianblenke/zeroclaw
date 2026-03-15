@@ -1209,14 +1209,25 @@ pub(super) async fn run_gateway_chat_with_tools(
 /// Streaming variant: runs the full agent loop but streams word-level deltas
 /// through the provided `on_delta` channel as the final response is generated.
 /// Used by the WS handler for real-time sentence-level TTS streaming.
+///
+/// When `prior_history` is provided, it replaces the default `[system, user]`
+/// history so WS sessions preserve conversation context across turns.
 pub(super) async fn run_gateway_streaming_chat_with_tools(
     state: &AppState,
     message: &str,
     session_id: Option<&str>,
     on_delta: tokio::sync::mpsc::Sender<String>,
+    prior_history: Option<Vec<crate::providers::ChatMessage>>,
 ) -> anyhow::Result<String> {
     let config = state.config.lock().clone();
-    crate::agent::process_message_with_session(config, message, session_id, Some(on_delta)).await
+    crate::agent::process_message_with_session_and_history(
+        config,
+        message,
+        session_id,
+        Some(on_delta),
+        prior_history,
+    )
+    .await
 }
 
 fn gateway_outbound_leak_guard_snapshot(
