@@ -55,6 +55,11 @@ const EXPOSED_TOOLS: &[&str] = &[
     "discord-scraper__update_interests",
     "discord-scraper__list_digests",
     "discord-scraper__get_digest",
+    // NATS event subscriptions (camera alerts, HA events)
+    "nats-bridge__nats_subscribe",
+    "nats-bridge__nats_unsubscribe",
+    "nats-bridge__nats_list_subscriptions",
+    "nats-bridge__nats_list_subjects",
     // Special: notification history (handled inline, not from tool registry)
     "list_notifications",
     "get_notification",
