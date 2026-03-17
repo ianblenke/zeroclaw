@@ -52,6 +52,7 @@ const EXPOSED_TOOLS: &[&str] = &[
     // Discord scraper
     "discord-scraper__scrape_now",
     "discord-scraper__scrape_status",
+    "discord-scraper__update_interests",
 ];
 
 /// Build a ToolSearchTool on the fly from the current tool registry.
