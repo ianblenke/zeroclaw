@@ -971,7 +971,9 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/_app/{*path}", get(static_files::handle_static))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE));
 
-    // Build final app: merge main routes (64KB limit) with special routes (own limits)
+    // Build final app: merge main routes (64KB limit) with special routes (own limits).
+    // The global body limit is NOT applied here — each router has its own limit.
+    // main_routes already has .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE)).
     let app = Router::new()
         .merge(main_routes)
         // ── Config PUT with larger body limit (1MB) ──
@@ -979,7 +981,6 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         // ── Internal push with larger body limit (2MB for audio payloads) ──
         .merge(internal_push_router)
         .with_state(state)
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(middleware::from_fn(security_headers_middleware))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
