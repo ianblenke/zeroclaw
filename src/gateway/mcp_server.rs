@@ -39,6 +39,7 @@ const EXPOSED_TOOLS: &[&str] = &[
     // MCP tools exposed directly so Claude doesn't need tool_search for common ops
     "knowledge-store__remember",
     "knowledge-store__list_knowledge",
+    "knowledge-store__search_knowledge",
     "knowledge-store__get_knowledge",
     "deep-research__start_deep_research",
     "deep-research__check_research_status",
