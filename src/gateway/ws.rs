@@ -759,7 +759,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, session_id: String) {
                                 .await;
                         }
 
-                        history.push(ChatMessage::assistant(&safe_response));
+                        // Strip <think> tags from history — they're displayed separately
+                        // in the thinking bubble and shouldn't pollute future turns.
+                        let history_response = crate::providers::compatible::strip_think_tags_public(&safe_response);
+                        history.push(ChatMessage::assistant(&history_response));
                         persist_ws_history(&state, &session_id, &history).await;
 
                         let done = serde_json::json!({

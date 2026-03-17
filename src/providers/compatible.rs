@@ -595,6 +595,12 @@ fn extract_think_content(s: &str) -> Option<String> {
     }
 }
 
+/// Public wrapper for `strip_think_tags` — used by the WS handler
+/// to clean thinking content from conversation history.
+pub fn strip_think_tags_public(s: &str) -> String {
+    strip_think_tags(s)
+}
+
 /// Remove `<think>...</think>` blocks from model output.
 /// Some reasoning models (e.g. MiniMax) embed their chain-of-thought inline
 /// in the `content` field rather than a separate `reasoning_content` field.
