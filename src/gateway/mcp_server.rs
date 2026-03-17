@@ -44,6 +44,14 @@ const EXPOSED_TOOLS: &[&str] = &[
     "deep-research__start_deep_research",
     "deep-research__check_research_status",
     "deep-research__get_research_report",
+    // Docmunch section-level retrieval (Discord content, research docs, etc.)
+    "docmunch__search_sections",
+    "docmunch__get_section",
+    "docmunch__list_repos",
+    "docmunch__get_toc",
+    // Discord scraper
+    "discord-scraper__scrape_now",
+    "discord-scraper__scrape_status",
 ];
 
 /// Build a ToolSearchTool on the fly from the current tool registry.
