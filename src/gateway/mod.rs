@@ -397,6 +397,8 @@ pub struct AppState {
     pub cost_tracker: Option<Arc<CostTracker>>,
     /// SSE broadcast channel for real-time events
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// Notification history ring buffer (last 100 push notifications)
+    pub notification_history: std::sync::Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
@@ -877,6 +879,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         max_tool_iterations,
         cost_tracker,
         event_tx,
+        notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
     };
 
     // Config PUT needs larger body limit (1MB)
@@ -1547,6 +1550,16 @@ async fn handle_internal_push(
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "target_session": payload.get("target_session").and_then(|s| s.as_str()),
     });
+
+    // Log to notification history
+    {
+        let mut history = state.notification_history.lock().await;
+        history.push(push_event.clone());
+        let len = history.len();
+        if len > 100 {
+            history.drain(..len - 100);
+        }
+    }
 
     let receivers = state.event_tx.send(push_event).unwrap_or(0);
     (
@@ -3203,6 +3216,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -3265,6 +3279,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -3310,6 +3325,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_metrics(State(state), test_public_connect_info(), HeaderMap::new())
@@ -3356,6 +3372,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let unauthorized =
@@ -3871,6 +3888,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -3945,6 +3963,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_webhook(
@@ -4000,6 +4019,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_webhook(
@@ -4056,6 +4076,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_webhook(
@@ -4121,6 +4142,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_node_control(
@@ -4179,6 +4201,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_node_control(
@@ -4243,6 +4266,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_node_control(
@@ -4301,6 +4325,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let headers = HeaderMap::new();
@@ -4389,6 +4414,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_webhook(
@@ -4447,6 +4473,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -4510,6 +4537,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -4617,6 +4645,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_wati_webhook(State(state), HeaderMap::new(), Bytes::from("{}"))
@@ -4669,6 +4698,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_wati_webhook(State(state), HeaderMap::new(), Bytes::from("{}"))
@@ -4723,6 +4753,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_wati_webhook(State(state), HeaderMap::new(), Bytes::from("{}"))
@@ -4778,6 +4809,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -4840,6 +4872,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -4900,6 +4933,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -4961,6 +4995,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -5022,6 +5057,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -5085,6 +5121,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -5140,6 +5177,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_github_webhook(
@@ -5196,6 +5234,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let body = r#"{
@@ -5263,6 +5302,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let body = r#"{
@@ -5335,6 +5375,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_nextcloud_talk_webhook(
@@ -5397,6 +5438,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
@@ -5452,6 +5494,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let response = handle_qq_webhook(
@@ -5506,6 +5549,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            notification_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         };
 
         let mut headers = HeaderMap::new();
