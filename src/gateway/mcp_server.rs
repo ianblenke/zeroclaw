@@ -34,6 +34,7 @@ const EXPOSED_TOOLS: &[&str] = &[
     "memory_observe",
     "cron_list",
     "cron_add",
+    "cron_update",
     "cron_remove",
     "cron_run",
     // MCP tools exposed directly so Claude doesn't need tool_search for common ops
